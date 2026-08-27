@@ -400,6 +400,100 @@ pub fn to_marketing_capability(reg: &MarketingRegistration) -> MarketingCapabili
     }
 }
 
+pub fn is_marketing_enabled() -> bool {
+    crate::customer_hub::env_flag_true("QEFRO_MARKETING_ENABLED", false)
+}
+
+/// Thin get-own-registration client via `platform.marketing`. Registry read only.
+#[derive(Clone, Default)]
+pub struct MarketingContext {
+    platform: Option<crate::customer_hub::PlatformCapabilities>,
+}
+
+impl MarketingContext {
+    pub fn new(platform: Option<crate::customer_hub::PlatformCapabilities>) -> Self {
+        Self { platform }
+    }
+
+    pub async fn get_registration(&self) -> anyhow::Result<Option<Value>> {
+        if !is_marketing_enabled() {
+            return Ok(None);
+        }
+        let binding = self.platform.as_ref().and_then(|p| p.marketing.as_ref());
+        let from_env = std::env::var("QEFRO_MARKETING_URL")
+            .ok()
+            .map(|s| s.trim_end_matches('/').to_string());
+        let base_url = binding
+            .and_then(|b| b.base_url.clone())
+            .or(from_env)
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        let context = binding.and_then(|b| b.context.as_ref());
+        if base_url.is_empty() || context.is_none() {
+            return Ok(None);
+        }
+        let context = context.unwrap();
+        if context.tenant_id.is_empty() || context.workspace_id.is_empty() {
+            return Ok(None);
+        }
+        let solution_id = match &context.solution_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => return Ok(None),
+        };
+        let token = binding
+            .and_then(|b| b.token.clone())
+            .or_else(|| std::env::var("QEFRO_SERVICE_TOKEN").ok())
+            .or_else(|| std::env::var("QEFRO_INTERNAL_TOKEN").ok())
+            .or_else(|| std::env::var("QEFRO_INTERNAL_BEARER").ok())
+            .unwrap_or_default();
+        let encoded: String = solution_id
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        let url = format!("{base_url}/v1/internal/marketing/registrations/{encoded}");
+        let mut req = reqwest::Client::new()
+            .get(&url)
+            .header("content-type", "application/json")
+            .header("x-qefro-tenant-id", &context.tenant_id)
+            .header("x-qefro-workspace-id", &context.workspace_id);
+        if let Some(ref installation_id) = context.installation_id {
+            if !installation_id.is_empty() {
+                req = req.header("x-qefro-installation-id", installation_id);
+            }
+        }
+        if !token.is_empty() {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "marketing.getRegistration failed ({status}): {text}"
+            ));
+        }
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_str(&text).ok())
+    }
+}
+
+pub fn build_marketing_context(
+    platform: Option<crate::customer_hub::PlatformCapabilities>,
+) -> MarketingContext {
+    MarketingContext::new(platform)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +597,12 @@ mod tests {
             wire["metadata"]["actions"][0]["landingPageId"],
             json!("booking")
         );
+    }
+
+    #[tokio::test]
+    async fn marketing_context_disabled_without_flag() {
+        assert!(!is_marketing_enabled());
+        let ctx = build_marketing_context(None);
+        assert!(ctx.get_registration().await.unwrap().is_none());
     }
 }

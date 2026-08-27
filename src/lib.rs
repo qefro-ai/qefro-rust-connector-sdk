@@ -3,9 +3,18 @@
 //! Organizations expose one signed webhook (typically `POST /qefro`).
 //! Qefro Runtime calls `ping`, `tools.list`, `tool.invoke`, and `tool.resume`.
 
+mod business_events;
 mod customer_hub;
+mod event_outbox;
 mod marketing;
+mod organization;
+mod person;
+mod storage;
 
+pub use business_events::{
+    is_business_event_type, normalize_business_event, normalize_emitted_event, stable_event_id,
+    BusinessEventDefinition, BusinessEventError, BusinessEventField, EmittedBusinessEvent,
+};
 pub use customer_hub::{
     env_flag_true, hub_call, hub_customer_from_person, is_customer_hub_enabled,
     is_customer_hub_optional, pick_identity, read_identity_phone, seed_from_person,
@@ -13,17 +22,32 @@ pub use customer_hub::{
     PlatformCustomerBinding, PlatformCustomerContext, PlatformStorageBinding,
     PlatformStorageContext, TimelineContext,
 };
+pub use event_outbox::{default_outbox_dir, EventOutbox};
 pub use marketing::{
-    to_marketing_capability, validate_marketing_definition, MarketingAction,
-    MarketingAudience, MarketingAudienceAppQuery, MarketingAudienceCustomerHub,
-    MarketingCapability, MarketingChannel, MarketingDefinition, MarketingError,
-    MarketingLandingPage, MarketingMetadata, MarketingRegistration, MarketingVariable,
+    build_marketing_context, is_marketing_enabled, to_marketing_capability,
+    validate_marketing_definition, MarketingAction, MarketingAudience, MarketingAudienceAppQuery,
+    MarketingAudienceCustomerHub, MarketingCapability, MarketingChannel, MarketingContext,
+    MarketingDefinition, MarketingError, MarketingLandingPage, MarketingMetadata,
+    MarketingRegistration, MarketingVariable,
 };
+pub use organization::{
+    build_organization_context, is_organization_enabled, to_organization_capability,
+    validate_organization_definition, OrganizationAction, OrganizationCapabilities,
+    OrganizationCapability, OrganizationContext, OrganizationDefinition, OrganizationError,
+    OrganizationEvent, OrganizationMetadata, OrganizationTaskType,
+};
+pub use person::{
+    on_person_created, on_person_merged, on_person_status_changed, on_person_updated,
+    person_event_trigger, PersonContext, PersonMutation, PERSON_ACTIVITY_CREATED, PERSON_ASSIGNED,
+    PERSON_CREATED, PERSON_MERGED, PERSON_STATUS_CHANGED, PERSON_TAG_CREATED, PERSON_UPDATED,
+};
+pub use storage::{build_storage_context, StorageContext};
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -68,6 +92,8 @@ pub struct QefroConfig {
     pub protocol_version: String,
     pub max_timestamp_skew_secs: i64,
     pub endpoint_path: String,
+    pub event_outbox_dir: Option<String>,
+    pub event_ingest_url: Option<String>,
 }
 
 impl QefroConfig {
@@ -77,6 +103,8 @@ impl QefroConfig {
             protocol_version: "1".into(),
             max_timestamp_skew_secs: 300,
             endpoint_path: "/qefro".into(),
+            event_outbox_dir: None,
+            event_ingest_url: None,
         }
     }
 }
@@ -155,6 +183,9 @@ pub struct ToolMetadata {
     /// What identity the runtime must have before invoking this tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookup: Option<ToolLookup>,
+    /// When `false`, not offered on customer chat channels. Default: omitted/`true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +205,8 @@ pub struct RegisteredTool {
     pub timeout: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookup: Option<ToolLookup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +365,26 @@ pub enum FlowStepKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    Message {
+        message: String,
+    },
+    Tag {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+    },
+    Activity {
+        activity_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<Value>,
+    },
+    Assign {
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<bool>,
+    },
 }
 
 /// Wire shape of a flow step: `{ id, type, config }`.
@@ -416,11 +469,12 @@ pub struct ChallengePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QefroRequest {
     pub protocol_version: String,
-    pub request_id: Uuid,
+    #[serde(default)]
+    pub request_id: String,
     #[serde(rename = "type")]
     pub request_type: String,
-    pub organization_id: Option<Uuid>,
-    pub conversation_id: Option<Uuid>,
+    pub organization_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub channel: Option<String>,
     pub identity: Option<Value>,
     pub tool: Option<String>,
@@ -434,6 +488,9 @@ pub struct QefroRequest {
     /// Managed storage / Customer Hub gateway for sdk.* bindings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformCapabilities>,
+    /// Per-install marketplace settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,9 +516,15 @@ pub enum QefroResponse {
         webhooks: Vec<EventHandlerDefinition>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         schedules: Vec<EventHandlerDefinition>,
+        /// Business Events this connector emits (CRM triggers).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        business_events: Vec<BusinessEventDefinition>,
         /// Present when `app.marketing(...)` was registered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         marketing: Option<MarketingCapability>,
+        /// Present when `app.organization(...)` was registered (ADR-005).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        organization: Option<OrganizationCapability>,
         protocol_version: String,
         sdk_version: String,
         sdk_name: String,
@@ -470,6 +533,10 @@ pub enum QefroResponse {
         output: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         authentication_context: Option<AuthenticationContextPayload>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        person_mutations: Option<Vec<PersonMutation>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        events: Option<Vec<EmittedBusinessEvent>>,
     },
     Challenge {
         resume_token: String,
@@ -484,12 +551,14 @@ pub enum QefroResponse {
 #[derive(Debug, Clone)]
 struct PendingInvocation {
     tool: String,
-    conversation_id: Uuid,
+    conversation_id: String,
     parameters: Value,
     identity: Option<Value>,
     channel: Option<String>,
     platform: Option<PlatformCapabilities>,
     person: Option<Value>,
+    settings: Option<Value>,
+    created_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -501,7 +570,7 @@ struct StoredAuth {
 
 #[derive(Debug, Clone)]
 pub struct Conversation {
-    pub id: Uuid,
+    pub id: String,
 }
 
 #[derive(Clone)]
@@ -523,12 +592,23 @@ pub struct ToolContext {
     pub consent: ConsentContext,
     /// Platform capabilities from `tool.invoke` (`platform.customer` / storage).
     pub platform: Option<PlatformCapabilities>,
+    pub settings: Option<Value>,
+    pub install_settings: Option<Value>,
+    pub trace_id: Option<String>,
+    pub person: PersonContext,
+    pub storage: StorageContext,
+    emit: Arc<dyn Fn(EmittedBusinessEvent) -> Result<()> + Send + Sync>,
 }
 
 impl ToolContext {
     /// In-handler customer helpers (mirrors JS `ctx.customer`).
     pub fn customer_api(&self) -> Option<&CustomerApi> {
         self.customer_api.as_ref()
+    }
+
+    /// Publish a durable Business Event after this tool succeeds.
+    pub fn emit(&self, event: EmittedBusinessEvent) -> Result<()> {
+        (self.emit)(event)
     }
 
     /// Raise an auth challenge from inside a tool handler (mirrors JS `AuthBuilder.challenge`).
@@ -761,6 +841,52 @@ impl FlowBuilder {
         self.push(id.into(), FlowStepKind::Complete { message })
     }
 
+    pub fn message(self, id: impl Into<String>, message: impl Into<String>) -> Self {
+        self.push(
+            id.into(),
+            FlowStepKind::Message {
+                message: message.into(),
+            },
+        )
+    }
+
+    pub fn tag(self, id: impl Into<String>, name: impl Into<String>, color: Option<String>) -> Self {
+        self.push(
+            id.into(),
+            FlowStepKind::Tag {
+                name: name.into(),
+                color,
+            },
+        )
+    }
+
+    pub fn activity(
+        self,
+        id: impl Into<String>,
+        activity_type: impl Into<String>,
+        source: Option<String>,
+        payload: Option<Value>,
+    ) -> Self {
+        self.push(
+            id.into(),
+            FlowStepKind::Activity {
+                activity_type: activity_type.into(),
+                source,
+                payload,
+            },
+        )
+    }
+
+    pub fn assign(self, id: impl Into<String>, to: impl Into<String>, handoff: Option<bool>) -> Self {
+        self.push(
+            id.into(),
+            FlowStepKind::Assign {
+                to: to.into(),
+                handoff,
+            },
+        )
+    }
+
     /// Append the terminal `complete` step and surface any recorded builder error.
     #[must_use = "handle the FlowError so malformed flows fail fast at startup"]
     pub fn complete(self, id: impl Into<String>, message: Option<String>) -> Result<(), FlowError> {
@@ -830,8 +956,13 @@ struct Inner {
     webhooks: RwLock<HashMap<String, EventHandlerDefinition>>,
     schedules: RwLock<HashMap<String, EventHandlerDefinition>>,
     marketing: RwLock<Option<MarketingRegistration>>,
+    organization: RwLock<Option<OrganizationCapabilities>>,
+    business_events: RwLock<HashMap<String, BusinessEventDefinition>>,
+    outbox: EventOutbox,
+    event_ingest_url: Option<String>,
+    flush_in_flight: tokio::sync::Mutex<bool>,
     pending: Mutex<HashMap<String, PendingInvocation>>,
-    auth_by_conversation: Mutex<HashMap<Uuid, StoredAuth>>,
+    auth_by_conversation: Mutex<HashMap<String, StoredAuth>>,
     customer_provider: RwLock<Option<Arc<dyn CustomerProvider>>>,
     middlewares: RwLock<Vec<MiddlewareFn>>,
     before_hooks: RwLock<Vec<BeforeHook>>,
@@ -848,7 +979,7 @@ pub struct CustomerApi {
     app: Qefro,
     identity: Value,
     parameters: Value,
-    conversation_id: Uuid,
+    conversation_id: String,
     channel: Option<String>,
     auth_response: Option<String>,
     state: Arc<Mutex<CustomerState>>,
@@ -942,7 +1073,7 @@ impl CustomerApi {
                 identity: self.identity.clone(),
                 parameters: self.parameters.clone(),
                 conversation: Conversation {
-                    id: self.conversation_id,
+                    id: self.conversation_id.clone(),
                 },
                 channel: self.channel.clone(),
             })
@@ -991,7 +1122,7 @@ impl CustomerApi {
                 identity,
                 parameters: self.parameters.clone(),
                 conversation: Conversation {
-                    id: self.conversation_id,
+                    id: self.conversation_id.clone(),
                 },
                 channel: self.channel.clone(),
             })
@@ -1150,7 +1281,7 @@ impl CustomerApi {
                 identity: self.identity.clone(),
                 parameters: self.parameters.clone(),
                 conversation: Conversation {
-                    id: self.conversation_id,
+                    id: self.conversation_id.clone(),
                 },
                 channel: self.channel.clone(),
             })
@@ -1159,7 +1290,7 @@ impl CustomerApi {
         self.app
             .consume_auth_outcome(
                 outcome,
-                self.conversation_id,
+                self.conversation_id.clone(),
                 Some(self.state.clone()),
                 None,
                 None,
@@ -1218,8 +1349,23 @@ pub struct Qefro {
 
 impl Qefro {
     pub fn new(config: QefroConfig) -> Self {
+        let outbox_dir = config
+            .event_outbox_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| default_outbox_dir(&config.signing_secret));
+        let event_ingest_url = config
+            .event_ingest_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Self {
             inner: Arc::new(Inner {
+                outbox: EventOutbox::new(outbox_dir),
+                event_ingest_url,
+                flush_in_flight: tokio::sync::Mutex::new(false),
+                business_events: RwLock::new(HashMap::new()),
                 config,
                 tools: RwLock::new(HashMap::new()),
                 flows: RwLock::new(HashMap::new()),
@@ -1227,6 +1373,7 @@ impl Qefro {
                 webhooks: RwLock::new(HashMap::new()),
                 schedules: RwLock::new(HashMap::new()),
                 marketing: RwLock::new(None),
+                organization: RwLock::new(None),
                 pending: Mutex::new(HashMap::new()),
                 auth_by_conversation: Mutex::new(HashMap::new()),
                 customer_provider: RwLock::new(None),
@@ -1259,6 +1406,38 @@ impl Qefro {
             ));
         }
         *slot = Some(validate_marketing_definition(def)?);
+        Ok(self)
+    }
+
+    /// Register Organization capability metadata (ADR-005 Phase 1). Metadata
+    /// only — advertised through `capabilities.list.organization`.
+    pub fn organization(
+        &self,
+        def: OrganizationDefinition,
+    ) -> std::result::Result<&Self, OrganizationError> {
+        let mut slot = self.inner.organization.write().expect("organization");
+        if slot.is_some() {
+            return Err(OrganizationError::Message(
+                "organization() may only be called once".into(),
+            ));
+        }
+        *slot = Some(validate_organization_definition(def)?);
+        Ok(self)
+    }
+
+    pub fn business_event(
+        &self,
+        def: BusinessEventDefinition,
+    ) -> std::result::Result<&Self, BusinessEventError> {
+        let normalized = normalize_business_event(def)?;
+        let mut map = self.inner.business_events.write().expect("business_events");
+        if map.contains_key(&normalized.event_type) {
+            return Err(BusinessEventError::Message(format!(
+                "businessEvent \"{}\" is already registered",
+                normalized.event_type
+            )));
+        }
+        map.insert(normalized.event_type.clone(), normalized);
         Ok(self)
     }
 
@@ -1384,7 +1563,7 @@ impl Qefro {
 
     /// Snapshot the valid registered flows for `capabilities.list`. Flows with a
     /// recorded builder error are excluded and logged.
-    fn list_registered_flows(&self) -> Vec<BusinessFlow> {
+    pub(crate) fn list_registered_flows(&self) -> Vec<BusinessFlow> {
         let flows = self.inner.flows.read().expect("flows");
         flows
             .values()
@@ -1458,8 +1637,30 @@ impl Qefro {
         a.len() == b.len() && bool::from(a.ct_eq(b))
     }
 
+    fn list_registered_tools(&self) -> Vec<RegisteredTool> {
+        let tools = self.inner.tools.read().expect("tools");
+        tools
+            .values()
+            .map(|r| RegisteredTool {
+                name: r.metadata.name.clone(),
+                description: r.metadata.description.clone(),
+                input_schema: r.metadata.input_schema.clone(),
+                authentication_methods: r.metadata.authentication_methods.clone(),
+                auth: r.metadata.auth,
+                permissions: r.metadata.permissions.clone(),
+                timeout: r.metadata.timeout,
+                lookup: r.metadata.lookup.clone(),
+                chat: r.metadata.chat,
+            })
+            .collect()
+    }
+
     /// Handle a verified protocol request (after signature check).
     pub async fn handle(&self, request: QefroRequest) -> QefroResponse {
+        self.handle_with_trace(request, None).await
+    }
+
+    pub(crate) async fn handle_with_trace(&self, request: QefroRequest, trace_id: Option<String>) -> QefroResponse {
         if request.protocol_version != self.inner.config.protocol_version {
             return QefroResponse::Error {
                 code: "protocol_mismatch".into(),
@@ -1472,49 +1673,27 @@ impl Qefro {
                 protocol_version: self.inner.config.protocol_version.clone(),
                 sdk_version: SDK_VERSION.into(),
             },
-            "tools.list" => {
-                let tools = self.inner.tools.read().expect("tools");
-                QefroResponse::ToolsList {
-                    tools: tools
-                        .values()
-                        .map(|r| RegisteredTool {
-                            name: r.metadata.name.clone(),
-                            description: r.metadata.description.clone(),
-                            input_schema: r.metadata.input_schema.clone(),
-                            authentication_methods: r.metadata.authentication_methods.clone(),
-                            auth: r.metadata.auth,
-                            permissions: r.metadata.permissions.clone(),
-                            timeout: r.metadata.timeout,
-                            lookup: r.metadata.lookup.clone(),
-                        })
-                        .collect(),
-                    protocol_version: self.inner.config.protocol_version.clone(),
-                    sdk_version: SDK_VERSION.into(),
-                }
-            }
+            "tools.list" => QefroResponse::ToolsList {
+                tools: self.list_registered_tools(),
+                protocol_version: self.inner.config.protocol_version.clone(),
+                sdk_version: SDK_VERSION.into(),
+            },
             "capabilities.list" => {
-                let tools = {
-                    let tools = self.inner.tools.read().expect("tools");
-                    tools
-                        .values()
-                        .map(|r| RegisteredTool {
-                            name: r.metadata.name.clone(),
-                            description: r.metadata.description.clone(),
-                            input_schema: r.metadata.input_schema.clone(),
-                            authentication_methods: r.metadata.authentication_methods.clone(),
-                            auth: r.metadata.auth,
-                            permissions: r.metadata.permissions.clone(),
-                            timeout: r.metadata.timeout,
-                            lookup: r.metadata.lookup.clone(),
-                        })
-                        .collect()
-                };
+                let business_events = self
+                    .inner
+                    .business_events
+                    .read()
+                    .expect("business_events")
+                    .values()
+                    .cloned()
+                    .collect();
                 QefroResponse::CapabilitiesList {
-                    tools,
+                    tools: self.list_registered_tools(),
                     flows: self.list_registered_flows(),
                     events: Self::list_named_handlers(&self.inner.events),
                     webhooks: Self::list_named_handlers(&self.inner.webhooks),
                     schedules: Self::list_named_handlers(&self.inner.schedules),
+                    business_events,
                     marketing: self
                         .inner
                         .marketing
@@ -1522,6 +1701,13 @@ impl Qefro {
                         .expect("marketing")
                         .as_ref()
                         .map(to_marketing_capability),
+                    organization: self
+                        .inner
+                        .organization
+                        .read()
+                        .expect("organization")
+                        .as_ref()
+                        .map(to_organization_capability),
                     protocol_version: self.inner.config.protocol_version.clone(),
                     sdk_version: SDK_VERSION.into(),
                     sdk_name: SDK_NAME.into(),
@@ -1531,13 +1717,17 @@ impl Qefro {
                 self.invoke(
                     request.tool,
                     request.parameters.unwrap_or_else(|| json!({})),
-                    request.conversation_id.unwrap_or_else(Uuid::new_v4),
+                    request
+                        .conversation_id
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
                     request.identity,
                     request.channel,
                     request.authentication,
                     None,
                     request.platform,
                     request.person,
+                    request.settings,
+                    trace_id,
                 )
                 .await
             }
@@ -1554,10 +1744,7 @@ impl Qefro {
                         message: "challenge_response is required".into(),
                     };
                 };
-                let pending = {
-                    let mut map = self.inner.pending.lock().await;
-                    map.remove(&resume_token)
-                };
+                let pending = self.take_pending(&resume_token).await;
                 let Some(pending) = pending else {
                     return QefroResponse::Error {
                         code: "not_found".into(),
@@ -1574,6 +1761,8 @@ impl Qefro {
                     Some(challenge_response),
                     request.platform.or(pending.platform),
                     request.person.or(pending.person),
+                    request.settings.or(pending.settings),
+                    trace_id,
                 )
                 .await
             }
@@ -1634,7 +1823,13 @@ impl Qefro {
             }
         };
 
-        (StatusCode::OK, self.handle(request).await)
+        let trace_id = header_str(headers, "x-qefro-trace-id")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let resp = self.handle_with_trace(request, trace_id).await;
+        self.schedule_flush();
+        (StatusCode::OK, resp)
     }
 
     /// Start an HTTP server (mirrors JS `listen`).
@@ -1658,7 +1853,8 @@ impl Qefro {
 
         let addr = format!("{host}:{}", options.port);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        let url = format!("http://{host}:{}{path}", options.port);
+        let bound_port = listener.local_addr()?.port();
+        let url = format!("http://{host}:{bound_port}{path}");
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let join = tokio::spawn(async move {
@@ -1680,13 +1876,15 @@ impl Qefro {
         &self,
         tool: Option<String>,
         parameters: Value,
-        conversation_id: Uuid,
+        conversation_id: String,
         identity: Option<Value>,
         channel: Option<String>,
         authentication: Option<Value>,
         auth_response: Option<String>,
         platform: Option<PlatformCapabilities>,
         person: Option<Value>,
+        settings: Option<Value>,
+        trace_id: Option<String>,
     ) -> QefroResponse {
         let Some(tool_name) = tool else {
             return QefroResponse::Error {
@@ -1720,7 +1918,6 @@ impl Qefro {
             }
         }
 
-        // Seed hub customer from Person snapshot when present (native chat path).
         if let Some(ref person_val) = person {
             if let Some(seeded) = seed_from_person(person_val) {
                 let mut state = customer_state.lock().await;
@@ -1733,7 +1930,7 @@ impl Qefro {
             app: self.clone(),
             identity: identity_value.clone(),
             parameters: parameters.clone(),
-            conversation_id,
+            conversation_id: conversation_id.clone(),
             channel: channel.clone(),
             auth_response: auth_response.clone(),
             state: customer_state.clone(),
@@ -1759,6 +1956,7 @@ impl Qefro {
                         channel.clone(),
                         platform.clone(),
                         person.clone(),
+                        settings.clone(),
                     )
                     .await
                 }
@@ -1792,11 +1990,48 @@ impl Qefro {
             state: customer_state.clone(),
         };
 
+        let person_mutations = Arc::new(StdMutex::new(Vec::new()));
+        let person_ctx = PersonContext::new(person.as_ref(), person_mutations.clone());
+        let session_events: Arc<StdMutex<Vec<EmittedBusinessEvent>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let app_for_emit = self.clone();
+        let emit_events = session_events.clone();
+        let emit: Arc<dyn Fn(EmittedBusinessEvent) -> Result<()> + Send + Sync> = Arc::new(
+            move |event: EmittedBusinessEvent| {
+                let event_type = event.event_type.trim().to_string();
+                if !is_business_event_type(&event_type) {
+                    return Err(anyhow!(
+                        "ctx.emit() requires a Business Event such as quotation.created, not a capability; got \"{}\"",
+                        event.event_type
+                    ));
+                }
+                let declared = {
+                    let map = app_for_emit
+                        .inner
+                        .business_events
+                        .read()
+                        .expect("business_events");
+                    if !map.is_empty() && !map.contains_key(&event_type) {
+                        return Err(anyhow!(
+                            "ctx.emit(\"{event_type}\") is not declared via app.business_event()"
+                        ));
+                    }
+                    map.get(&event_type).cloned()
+                };
+                let durable = normalize_emitted_event(event, declared.as_ref())
+                    .map_err(|e| anyhow!(e.to_string()))?;
+                app_for_emit.inner.outbox.put(durable.clone())?;
+                emit_events.lock().expect("events").push(durable);
+                app_for_emit.schedule_flush();
+                Ok(())
+            },
+        );
+
         let ctx = ToolContext {
             identity: identity_value,
             parameters: parameters.clone(),
             conversation: Conversation {
-                id: conversation_id,
+                id: conversation_id.clone(),
             },
             channel: channel.clone(),
             authentication,
@@ -1807,6 +2042,12 @@ impl Qefro {
             membership,
             consent,
             platform: platform.clone(),
+            settings: settings.clone(),
+            install_settings: settings.clone(),
+            trace_id,
+            person: person_ctx,
+            storage: build_storage_context(platform.clone()),
+            emit,
         };
 
         let before_hooks = self.inner.before_hooks.read().expect("before_hooks").clone();
@@ -1817,11 +2058,12 @@ impl Qefro {
                     self,
                     &tool_name,
                     &parameters,
-                    conversation_id,
+                    conversation_id.clone(),
                     identity.clone(),
                     channel.clone(),
                     platform.clone(),
                     person.clone(),
+                    settings.clone(),
                 )
                 .await;
             }
@@ -1844,6 +2086,7 @@ impl Qefro {
                     channel,
                     platform,
                     person,
+                    settings,
                 )
                 .await;
             }
@@ -1865,6 +2108,7 @@ impl Qefro {
                         channel,
                         platform,
                         person,
+                        settings,
                     )
                     .await;
                 }
@@ -1877,19 +2121,116 @@ impl Qefro {
                 .filter(|v| v.expires_at_epoch_ms > Utc::now().timestamp_millis())
                 .map(|v| v.auth.clone())
         };
+        let mutations = person_mutations.lock().expect("mutations").clone();
+        let events = self.merge_pending_events(&session_events.lock().expect("events"));
 
         QefroResponse::Result {
             output,
             authentication_context: auth,
+            person_mutations: if mutations.is_empty() {
+                None
+            } else {
+                Some(mutations)
+            },
+            events: if events.is_empty() { None } else { Some(events) },
         }
+    }
+
+    fn merge_pending_events(&self, session: &[EmittedBusinessEvent]) -> Vec<EmittedBusinessEvent> {
+        let mut by_id: HashMap<String, EmittedBusinessEvent> = HashMap::new();
+        for event in self.inner.outbox.pending() {
+            if let Some(id) = event.event_id.clone() {
+                by_id.insert(id, event);
+            }
+        }
+        for event in session {
+            if let Some(id) = event.event_id.clone() {
+                by_id.insert(id, event.clone());
+            }
+        }
+        by_id.into_values().collect()
+    }
+
+    fn schedule_flush(&self) {
+        if self.inner.event_ingest_url.is_none() {
+            return;
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut in_flight = app.inner.flush_in_flight.lock().await;
+            if *in_flight {
+                return;
+            }
+            *in_flight = true;
+            drop(in_flight);
+            app.flush_outbox().await;
+            *app.inner.flush_in_flight.lock().await = false;
+        });
+    }
+
+    async fn flush_outbox(&self) {
+        let Some(url) = self.inner.event_ingest_url.clone() else {
+            return;
+        };
+        for event in self.inner.outbox.pending() {
+            if self.post_ingest(&url, &event).await {
+                if let Some(id) = event.event_id.as_deref() {
+                    self.inner.outbox.ack(id);
+                }
+            }
+        }
+    }
+
+    async fn post_ingest(&self, url: &str, event: &EmittedBusinessEvent) -> bool {
+        let body = json!({
+            "name": event.event_type,
+            "event_type": event.event_type,
+            "event_id": event.event_id,
+            "payload": {
+                "customer": event.customer.clone().unwrap_or_else(|| json!({})),
+                "data": event.data.clone().unwrap_or_else(|| json!({})),
+                "event_version": event.version.unwrap_or(1),
+                "external_event_id": event.event_id,
+                "timestamp": event.timestamp,
+            }
+        });
+        let body_str = body.to_string();
+        let ts = Utc::now().timestamp();
+        let payload = format!("v1:{ts}:{body_str}");
+        let mut mac = HmacSha256::new_from_slice(self.inner.config.signing_secret.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(payload.as_bytes());
+        let signature = format!("v1={}", hex::encode(mac.finalize().into_bytes()));
+        let res = reqwest::Client::new()
+            .post(url)
+            .header("content-type", "application/json")
+            .header("x-qefro-signature", signature)
+            .header("x-qefro-timestamp", ts.to_string())
+            .body(body_str)
+            .send()
+            .await;
+        match res {
+            Ok(r) => r.status().is_success() || r.status().as_u16() == 409,
+            Err(_) => false,
+        }
+    }
+
+    async fn take_pending(&self, token: &str) -> Option<PendingInvocation> {
+        self.prune_expired_pending().await;
+        self.inner.pending.lock().await.remove(token)
+    }
+
+    async fn prune_expired_pending(&self) {
+        let now = now_ms();
+        let mut map = self.inner.pending.lock().await;
+        map.retain(|_, p| now.saturating_sub(p.created_at_ms) <= 15 * 60 * 1000);
     }
 
     async fn consume_auth_outcome(
         &self,
         outcome: AuthOutcome,
-        conversation_id: Uuid,
+        conversation_id: String,
         customer_state: Option<Arc<Mutex<CustomerState>>>,
-        // When challenge: stash pending invoke
         pending_tool: Option<&str>,
         pending_parameters: Option<Value>,
         pending_identity: Option<Value>,
@@ -1926,10 +2267,10 @@ impl Qefro {
                             channel: pending_channel,
                             platform: None,
                             person: None,
+                            settings: None,
+                            created_at_ms: now_ms(),
                         },
                     );
-                    // Encode resume in error path via ChallengeSignal — callers for required-auth
-                    // use map_invoke_error. For CustomerApi.authorize we raise ChallengeSignal.
                     let _ = resume_token;
                 }
                 Err(ChallengeSignal { challenge }.into())
@@ -1941,7 +2282,7 @@ impl Qefro {
 
     pub async fn require_authentication(
         &self,
-        conversation_id: Uuid,
+        conversation_id: String,
         outcome: AuthOutcome,
         tool: &str,
         parameters: Value,
@@ -1973,6 +2314,8 @@ impl Qefro {
                         channel,
                         platform: None,
                         person: None,
+                        settings: None,
+                        created_at_ms: now_ms(),
                     },
                 );
                 Err(QefroResponse::Challenge {
@@ -1992,16 +2335,24 @@ impl Qefro {
     }
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 async fn map_invoke_error(
     e: anyhow::Error,
     app: &Qefro,
     tool_name: &str,
     parameters: &Value,
-    conversation_id: Uuid,
+    conversation_id: String,
     identity: Option<Value>,
     channel: Option<String>,
     platform: Option<PlatformCapabilities>,
     person: Option<Value>,
+    settings: Option<Value>,
 ) -> QefroResponse {
     if let Some(signal) = e.downcast_ref::<ChallengeSignal>() {
         let resume_token = Uuid::new_v4().to_string();
@@ -2015,6 +2366,8 @@ async fn map_invoke_error(
                 channel,
                 platform,
                 person,
+                settings,
+                created_at_ms: now_ms(),
             },
         );
         return QefroResponse::Challenge {
@@ -2034,6 +2387,12 @@ async fn map_invoke_error(
         return QefroResponse::Error {
             code: "customer_not_found".into(),
             message: "Customer not found".into(),
+        };
+    }
+    if message == "person_not_found" {
+        return QefroResponse::Error {
+            code: "person_not_found".into(),
+            message: "No Customer Hub Person is linked to this conversation.".into(),
         };
     }
     if message == "customer_provider_missing" {
@@ -2156,7 +2515,7 @@ mod tests {
         let resp = app
             .handle(QefroRequest {
                 protocol_version: "1".into(),
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::new_v4().to_string(),
                 request_type: "tools.list".into(),
                 organization_id: None,
                 conversation_id: None,
@@ -2169,6 +2528,7 @@ mod tests {
                 challenge_response: None,
                 person: None,
                 platform: None,
+                settings: None,
             })
             .await;
 
@@ -2187,7 +2547,7 @@ mod tests {
     fn capabilities_request() -> QefroRequest {
         QefroRequest {
             protocol_version: "1".into(),
-            request_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4().to_string(),
             request_type: "capabilities.list".into(),
             organization_id: None,
             conversation_id: None,
@@ -2200,6 +2560,7 @@ mod tests {
             challenge_response: None,
             person: None,
             platform: None,
+            settings: None,
         }
     }
 
@@ -2431,7 +2792,7 @@ mod tests {
         let resp = app
             .handle(QefroRequest {
                 protocol_version: "1".into(),
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::new_v4().to_string(),
                 request_type: "tools.list".into(),
                 organization_id: None,
                 conversation_id: None,
@@ -2444,6 +2805,7 @@ mod tests {
                 challenge_response: None,
                 person: None,
                 platform: None,
+                settings: None,
             })
             .await;
         let value = serde_json::to_value(&resp).expect("serialize");
@@ -2492,7 +2854,7 @@ mod tests {
         let resp = app
             .handle(QefroRequest {
                 protocol_version: "1".into(),
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::new_v4().to_string(),
                 request_type: "tool.invoke".into(),
                 organization_id: None,
                 conversation_id: None,
@@ -2505,6 +2867,7 @@ mod tests {
                 challenge_response: None,
                 person: None,
                 platform: None,
+                settings: None,
             })
             .await;
         let value = serde_json::to_value(&resp).unwrap();
@@ -2535,7 +2898,7 @@ mod tests {
         let resp = app
             .handle(QefroRequest {
                 protocol_version: "1".into(),
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::new_v4().to_string(),
                 request_type: "tool.invoke".into(),
                 organization_id: None,
                 conversation_id: None,
@@ -2552,6 +2915,7 @@ mod tests {
                     "name": "Sam",
                 })),
                 platform: None,
+                settings: None,
             })
             .await;
         let value = serde_json::to_value(&resp).unwrap();
@@ -2588,7 +2952,7 @@ mod tests {
         let resp = app
             .handle(QefroRequest {
                 protocol_version: "1".into(),
-                request_id: Uuid::new_v4(),
+                request_id: Uuid::new_v4().to_string(),
                 request_type: "tool.invoke".into(),
                 organization_id: None,
                 conversation_id: None,
@@ -2601,6 +2965,7 @@ mod tests {
                 challenge_response: None,
                 person: None,
                 platform: None,
+                settings: None,
             })
             .await;
         let value = serde_json::to_value(&resp).unwrap();
@@ -2608,5 +2973,158 @@ mod tests {
         assert_eq!(value["output"]["ok"], true);
         std::env::remove_var("QEFRO_CUSTOMER_HUB_ENABLED");
         std::env::remove_var("QEFRO_CUSTOMER_HUB_OPTIONAL");
+    }
+
+    #[test]
+    fn stable_event_id_unique_per_type() {
+        assert_eq!(
+            stable_event_id("quotation.created", "Q-1001").unwrap(),
+            "quotation.created:Q-1001"
+        );
+        assert_eq!(
+            stable_event_id("order.created", "Q-1001").unwrap(),
+            "order.created:Q-1001"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctx_emit_persists_versioned_event() {
+        let dir = std::env::temp_dir().join(format!("qefro-outbox-{}", Uuid::new_v4()));
+        let mut config = QefroConfig::new("secret");
+        config.event_outbox_dir = Some(dir.to_string_lossy().into());
+        let app = Qefro::new(config);
+        app.business_event(BusinessEventDefinition {
+            event_type: "quotation.created".into(),
+            version: 1,
+            label: Some("Quotation created".into()),
+            description: None,
+            schema: None,
+        })
+        .expect("business event");
+        app.tool(
+            ToolMetadata {
+                name: "createQuotation".into(),
+                auth: ToolAuthMode::None,
+                ..Default::default()
+            },
+            |ctx| async move {
+                ctx.emit(EmittedBusinessEvent {
+                    event_type: "quotation.created".into(),
+                    version: None,
+                    event_id: Some("Q-1001".into()),
+                    customer: None,
+                    data: Some(json!({ "amount": 125000 })),
+                    timestamp: None,
+                })?;
+                Ok(json!({ "id": "Q-1001" }))
+            },
+        );
+        let resp = app
+            .handle(QefroRequest {
+                protocol_version: "1".into(),
+                request_id: "r-emit".into(),
+                request_type: "tool.invoke".into(),
+                organization_id: None,
+                conversation_id: Some("c1".into()),
+                channel: None,
+                identity: None,
+                tool: Some("createQuotation".into()),
+                parameters: Some(json!({})),
+                authentication: None,
+                resume_token: None,
+                challenge_response: None,
+                person: None,
+                platform: None,
+                settings: None,
+            })
+            .await;
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["type"], "result");
+        assert_eq!(value["events"][0]["event_type"], "quotation.created");
+        assert_eq!(value["events"][0]["event_id"], "quotation.created:Q-1001");
+        assert_eq!(value["events"][0]["version"], 1);
+
+        let caps = app.handle(capabilities_request()).await;
+        let caps = serde_json::to_value(&caps).unwrap();
+        assert_eq!(caps["business_events"][0]["version"], 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn person_mutations_and_trace() {
+        let app = Qefro::new(QefroConfig::new("secret"));
+        app.tool(
+            ToolMetadata {
+                name: "tag_person".into(),
+                auth: ToolAuthMode::None,
+                ..Default::default()
+            },
+            |ctx| async move {
+                ctx.person.tag("vip", None)?;
+                Ok(json!({
+                    "trace": ctx.trace_id,
+                    "id": ctx.person.require()?.get("id"),
+                }))
+            },
+        );
+        let resp = app
+            .handle_with_trace(
+                QefroRequest {
+                    protocol_version: "1".into(),
+                    request_id: "x".into(),
+                    request_type: "tool.invoke".into(),
+                    organization_id: None,
+                    conversation_id: None,
+                    channel: None,
+                    identity: None,
+                    tool: Some("tag_person".into()),
+                    parameters: Some(json!({})),
+                    authentication: None,
+                    resume_token: None,
+                    challenge_response: None,
+                    person: Some(json!({ "id": "p1", "name": "Ada" })),
+                    platform: None,
+                    settings: None,
+                },
+                Some("trace-1".into()),
+            )
+            .await;
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["type"], "result");
+        assert_eq!(value["output"]["trace"], "trace-1");
+        assert_eq!(value["output"]["id"], "p1");
+        assert_eq!(value["person_mutations"][0]["op"], "tag");
+        assert_eq!(value["person_mutations"][0]["name"], "vip");
+    }
+
+    #[test]
+    fn flow_person_hub_steps() {
+        let app = Qefro::new(QefroConfig::new("secret"));
+        app.flow(BusinessFlowMetadata {
+            id: "welcome".into(),
+            trigger: Some(on_person_created(None)),
+            ..Default::default()
+        })
+        .unwrap()
+        .message("hi", "Hi {{person.name}}")
+        .tag("vip", "vip", None)
+        .assign("sales", "sales", None)
+        .activity("note", "note.logged", None, None)
+        .complete("done", None)
+        .unwrap();
+        let flows = app.list_registered_flows();
+        let types: Vec<&str> = flows[0]
+            .steps
+            .iter()
+            .map(|s| match s.kind {
+                FlowStepKind::Message { .. } => "message",
+                FlowStepKind::Tag { .. } => "tag",
+                FlowStepKind::Assign { .. } => "assign",
+                FlowStepKind::Activity { .. } => "activity",
+                FlowStepKind::Complete { .. } => "complete",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(types, vec!["message", "tag", "assign", "activity", "complete"]);
     }
 }

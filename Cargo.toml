@@ -1,6 +1,6 @@
 [package]
 name = "qefro-backend-sdk"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Qefro backend framework for business tool handlers and customer authorization orchestration"
 license = "MIT"

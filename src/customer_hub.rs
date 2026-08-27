@@ -74,6 +74,12 @@ pub struct PlatformCapabilities {
     /// Optional Customer Hub binding (`QEFRO_CUSTOMER_HUB_ENABLED`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer: Option<PlatformCustomerBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketing: Option<PlatformCustomerBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<PlatformCustomerBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Value>,
 }
 
 #[derive(Debug, Default)]

@@ -6,6 +6,10 @@ Organizations expose one signed webhook (typically `POST /qefro`). Qefro Runtime
 
 Companion TypeScript package: [`@qefro-ai/backend`](https://www.npmjs.com/package/@qefro-ai/backend) (feature-parity target).
 
+`ctx.emit()` publishes durable Business Events (declare them with `app.business_event()`).
+`ctx.person` queues Customer Hub Person mutations. `ctx.storage` talks to managed storage.
+Flow steps include `.message() .tag() .assign() .activity()`.
+
 ## Install
 
 ```toml
