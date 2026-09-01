@@ -1,6 +1,10 @@
 # qefro-backend-sdk
 
-Qefro backend framework for Business Tool handlers and customer authorization (Rust).
+Qefro backend framework for connecting **external** ERP / POS / CRM systems:
+Business Tool handlers and customer authorization (Rust).
+
+Marketplace Apps do **not** use this crate — they are metadata executed by
+Qefro Runtime.
 
 Organizations expose one signed webhook (typically `POST /qefro`). Qefro Runtime calls `ping`, `capabilities.list`, `tool.invoke`, and `tool.resume`. Authentication stays in your handlers — Qefro only relays challenges.
 
