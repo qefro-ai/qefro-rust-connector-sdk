@@ -6,6 +6,7 @@
 mod business_events;
 mod customer_hub;
 mod event_outbox;
+mod idempotency_inbox;
 mod marketing;
 mod organization;
 mod person;
@@ -23,6 +24,10 @@ pub use customer_hub::{
     PlatformStorageContext, TimelineContext,
 };
 pub use event_outbox::{default_outbox_dir, EventOutbox};
+pub use idempotency_inbox::{
+    default_inbox_dir, is_pre_mutation_error, is_production_env, ClaimResult, IdempotencyInbox,
+    InboxRecord, InboxStatus, PreMutationError, DEFAULT_CRASH_WINDOW_SECS, DEFAULT_RETENTION_TTL_DAYS,
+};
 pub use marketing::{
     build_marketing_context, is_marketing_enabled, to_marketing_capability,
     validate_marketing_definition, MarketingAction, MarketingAudience, MarketingAudienceAppQuery,
@@ -94,6 +99,7 @@ pub struct QefroConfig {
     pub endpoint_path: String,
     pub event_outbox_dir: Option<String>,
     pub event_ingest_url: Option<String>,
+    pub idempotency_dir: Option<String>,
 }
 
 impl QefroConfig {
@@ -105,6 +111,7 @@ impl QefroConfig {
             endpoint_path: "/qefro".into(),
             event_outbox_dir: None,
             event_ingest_url: None,
+            idempotency_dir: None,
         }
     }
 }
@@ -186,6 +193,9 @@ pub struct ToolMetadata {
     /// When `false`, not offered on customer chat channels. Default: omitted/`true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<bool>,
+    /// Whether the tool connector durably deduplicates requests by idempotency key / request_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_supported: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +217,9 @@ pub struct RegisteredTool {
     pub lookup: Option<ToolLookup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<bool>,
+    /// Whether the tool connector durably deduplicates requests by idempotency key / request_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_supported: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +608,8 @@ pub struct ToolContext {
     pub settings: Option<Value>,
     pub install_settings: Option<Value>,
     pub trace_id: Option<String>,
+    pub request_id: String,
+    pub idempotency_key: Option<String>,
     pub person: PersonContext,
     pub storage: StorageContext,
     emit: Arc<dyn Fn(EmittedBusinessEvent) -> Result<()> + Send + Sync>,
@@ -959,6 +974,7 @@ struct Inner {
     organization: RwLock<Option<OrganizationCapabilities>>,
     business_events: RwLock<HashMap<String, BusinessEventDefinition>>,
     outbox: EventOutbox,
+    inbox: IdempotencyInbox,
     event_ingest_url: Option<String>,
     flush_in_flight: tokio::sync::Mutex<bool>,
     pending: Mutex<HashMap<String, PendingInvocation>>,
@@ -1354,6 +1370,11 @@ impl Qefro {
             .clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| default_outbox_dir(&config.signing_secret));
+        let inbox_dir = config
+            .idempotency_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| default_inbox_dir(&config.signing_secret));
         let event_ingest_url = config
             .event_ingest_url
             .as_deref()
@@ -1363,6 +1384,7 @@ impl Qefro {
         Self {
             inner: Arc::new(Inner {
                 outbox: EventOutbox::new(outbox_dir),
+                inbox: IdempotencyInbox::new(inbox_dir),
                 event_ingest_url,
                 flush_in_flight: tokio::sync::Mutex::new(false),
                 business_events: RwLock::new(HashMap::new()),
@@ -1651,6 +1673,7 @@ impl Qefro {
                 timeout: r.metadata.timeout,
                 lookup: r.metadata.lookup.clone(),
                 chat: r.metadata.chat,
+                idempotency_supported: r.metadata.idempotency_supported,
             })
             .collect()
     }
@@ -1714,6 +1737,11 @@ impl Qefro {
                 }
             }
             "tool.invoke" => {
+                let req_id = if request.request_id.trim().is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    request.request_id.clone()
+                };
                 self.invoke(
                     request.tool,
                     request.parameters.unwrap_or_else(|| json!({})),
@@ -1728,6 +1756,8 @@ impl Qefro {
                     request.person,
                     request.settings,
                     trace_id,
+                    req_id,
+                    request.organization_id,
                 )
                 .await
             }
@@ -1751,6 +1781,11 @@ impl Qefro {
                         message: "resume token not found or expired".into(),
                     };
                 };
+                let req_id = if request.request_id.trim().is_empty() {
+                    format!("resume:{}", resume_token)
+                } else {
+                    request.request_id.clone()
+                };
                 self.invoke(
                     Some(pending.tool),
                     pending.parameters,
@@ -1763,6 +1798,8 @@ impl Qefro {
                     request.person.or(pending.person),
                     request.settings.or(pending.settings),
                     trace_id,
+                    req_id,
+                    request.organization_id,
                 )
                 .await
             }
@@ -1810,7 +1847,7 @@ impl Qefro {
             }
         }
 
-        let request: QefroRequest = match serde_json::from_str(body) {
+        let mut request: QefroRequest = match serde_json::from_str(body) {
             Ok(r) => r,
             Err(e) => {
                 return (
@@ -1823,13 +1860,36 @@ impl Qefro {
             }
         };
 
+        if request.request_id.trim().is_empty() {
+            if let Some(req_id) = header_str(headers, "x-qefro-request-id")
+                .or_else(|| header_str(headers, "x-qefro-idempotency-key"))
+            {
+                request.request_id = req_id.to_string();
+            }
+        }
+        if request.organization_id.is_none() {
+            if let Some(org_id) = header_str(headers, "x-qefro-tenant-id")
+                .or_else(|| header_str(headers, "x-qefro-organization-id"))
+            {
+                request.organization_id = Some(org_id.to_string());
+            }
+        }
+
         let trace_id = header_str(headers, "x-qefro-trace-id")
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let resp = self.handle_with_trace(request, trace_id).await;
         self.schedule_flush();
-        (StatusCode::OK, resp)
+        let status = match &resp {
+            QefroResponse::Error { code, .. }
+                if code == "CONCURRENT_INVOCATION" || code == "UNCERTAIN_OUTCOME" =>
+            {
+                StatusCode::CONFLICT
+            }
+            _ => StatusCode::OK,
+        };
+        (status, resp)
     }
 
     /// Start an HTTP server (mirrors JS `listen`).
@@ -1885,6 +1945,8 @@ impl Qefro {
         person: Option<Value>,
         settings: Option<Value>,
         trace_id: Option<String>,
+        request_id: String,
+        tenant_id: Option<String>,
     ) -> QefroResponse {
         let Some(tool_name) = tool else {
             return QefroResponse::Error {
@@ -1903,6 +1965,52 @@ impl Qefro {
                 message: format!("Unknown tool: {tool_name}"),
             };
         };
+
+        let idempotency_enabled = registration
+            .metadata
+            .idempotency_supported
+            .unwrap_or(false);
+
+        if idempotency_enabled && !request_id.is_empty() {
+            match self
+                .inner
+                .inbox
+                .claim(tenant_id.as_deref(), &tool_name, &request_id)
+            {
+                Ok(ClaimResult::Cached(cached_val)) => {
+                    if let Ok(resp) = serde_json::from_value::<QefroResponse>(cached_val.clone()) {
+                        return resp;
+                    }
+                    return QefroResponse::Result {
+                        output: cached_val,
+                        authentication_context: None,
+                        person_mutations: None,
+                        events: None,
+                    };
+                }
+                Ok(ClaimResult::ConcurrentExecution) => {
+                    return QefroResponse::Error {
+                        code: "CONCURRENT_INVOCATION".into(),
+                        message: format!(
+                            "Tool '{tool_name}' with request_id '{request_id}' is currently being executed by another worker"
+                        ),
+                    };
+                }
+                Ok(ClaimResult::UncertainCrash(rec)) => {
+                    return QefroResponse::Error {
+                        code: "UNCERTAIN_OUTCOME".into(),
+                        message: format!(
+                            "Tool '{}' with request_id '{}' was started at {} but did not complete within the crash recovery window ({}s). Manual reconciliation required.",
+                            tool_name, request_id, rec.created_at, DEFAULT_CRASH_WINDOW_SECS
+                        ),
+                    };
+                }
+                Ok(ClaimResult::Claimed) => {}
+                Err(e) => {
+                    let _ = e;
+                }
+            }
+        }
 
         let identity_value = identity.clone().unwrap_or_else(|| json!({}));
         let customer_state = Arc::new(Mutex::new(CustomerState::default()));
@@ -2045,6 +2153,8 @@ impl Qefro {
             settings: settings.clone(),
             install_settings: settings.clone(),
             trace_id,
+            request_id: request_id.clone(),
+            idempotency_key: Some(request_id.clone()),
             person: person_ctx,
             storage: build_storage_context(platform.clone()),
             emit,
@@ -2053,6 +2163,9 @@ impl Qefro {
         let before_hooks = self.inner.before_hooks.read().expect("before_hooks").clone();
         for hook in &before_hooks {
             if let Err(e) = hook(ctx.clone()).await {
+                if idempotency_enabled && !request_id.is_empty() {
+                    let _ = self.inner.inbox.fail_retryable(tenant_id.as_deref(), &tool_name, &request_id);
+                }
                 return map_invoke_error(
                     e,
                     self,
@@ -2076,6 +2189,13 @@ impl Qefro {
         let output = match run_result {
             Ok(v) => v,
             Err(e) => {
+                if idempotency_enabled && !request_id.is_empty() {
+                    if is_pre_mutation_error(&e) {
+                        let _ = self.inner.inbox.fail_retryable(tenant_id.as_deref(), &tool_name, &request_id);
+                    } else {
+                        let _ = self.inner.inbox.fail_uncertain(tenant_id.as_deref(), &tool_name, &request_id);
+                    }
+                }
                 return map_invoke_error(
                     e,
                     self,
@@ -2098,6 +2218,9 @@ impl Qefro {
             match hook(ctx.clone(), output).await {
                 Ok(v) => output = v,
                 Err(e) => {
+                    if idempotency_enabled && !request_id.is_empty() {
+                        let _ = self.inner.inbox.fail_uncertain(tenant_id.as_deref(), &tool_name, &request_id);
+                    }
                     return map_invoke_error(
                         e,
                         self,
@@ -2124,7 +2247,7 @@ impl Qefro {
         let mutations = person_mutations.lock().expect("mutations").clone();
         let events = self.merge_pending_events(&session_events.lock().expect("events"));
 
-        QefroResponse::Result {
+        let response = QefroResponse::Result {
             output,
             authentication_context: auth,
             person_mutations: if mutations.is_empty() {
@@ -2133,7 +2256,18 @@ impl Qefro {
                 Some(mutations)
             },
             events: if events.is_empty() { None } else { Some(events) },
+        };
+
+        if idempotency_enabled && !request_id.is_empty() {
+            if let Ok(resp_json) = serde_json::to_value(&response) {
+                let _ = self
+                    .inner
+                    .inbox
+                    .complete(tenant_id.as_deref(), &tool_name, &request_id, resp_json);
+            }
         }
+
+        response
     }
 
     fn merge_pending_events(&self, session: &[EmittedBusinessEvent]) -> Vec<EmittedBusinessEvent> {
@@ -3126,5 +3260,217 @@ mod tests {
             })
             .collect();
         assert_eq!(types, vec!["message", "tag", "assign", "activity", "complete"]);
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_idempotency_cached_on_replay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("qefro-idemp-test-{}", Uuid::new_v4()));
+        let mut config = QefroConfig::new("test-secret");
+        config.idempotency_dir = Some(dir.to_string_lossy().into());
+        let app = Qefro::new(config);
+
+        let execution_counter = Arc::new(AtomicUsize::new(0));
+        let counter = execution_counter.clone();
+
+        app.tool(
+            ToolMetadata {
+                name: "order_cancel".into(),
+                auth: ToolAuthMode::None,
+                idempotency_supported: Some(true),
+                ..Default::default()
+            },
+            move |ctx| {
+                let cnt = counter.clone();
+                async move {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(ctx.request_id, "req-order-cancel-1");
+                    assert_eq!(ctx.idempotency_key.as_deref(), Some("req-order-cancel-1"));
+                    Ok(json!({ "order_id": "ORD-1001", "canceled": true }))
+                }
+            },
+        );
+
+        let make_request = || QefroRequest {
+            protocol_version: "1".into(),
+            request_id: "req-order-cancel-1".into(),
+            request_type: "tool.invoke".into(),
+            organization_id: Some("tenant-corp".into()),
+            conversation_id: Some("conv-1".into()),
+            channel: Some("whatsapp".into()),
+            identity: None,
+            tool: Some("order_cancel".into()),
+            parameters: Some(json!({"order_id": "ORD-1001"})),
+            authentication: None,
+            resume_token: None,
+            challenge_response: None,
+            person: None,
+            platform: None,
+            settings: None,
+        };
+
+        // First attempt: handler executes, counter -> 1
+        let resp1 = app.handle(make_request()).await;
+        let val1 = serde_json::to_value(&resp1).unwrap();
+        assert_eq!(val1["type"], "result");
+        assert_eq!(val1["output"]["canceled"], true);
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 1);
+
+        // Second attempt with identical request_id: cached response, counter stays 1!
+        let resp2 = app.handle(make_request()).await;
+        let val2 = serde_json::to_value(&resp2).unwrap();
+        assert_eq!(val2["type"], "result");
+        assert_eq!(val2["output"]["canceled"], true);
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 1, "handler MUST NOT execute a second time!");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_handler_failure_is_uncertain_blocks_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("qefro-idemp-test-{}", Uuid::new_v4()));
+        let mut config = QefroConfig::new("test-secret");
+        config.idempotency_dir = Some(dir.to_string_lossy().into());
+        let app = Qefro::new(config);
+
+        let execution_counter = Arc::new(AtomicUsize::new(0));
+        let counter = execution_counter.clone();
+
+        app.tool(
+            ToolMetadata {
+                name: "charge_customer".into(),
+                auth: ToolAuthMode::None,
+                idempotency_supported: Some(true),
+                ..Default::default()
+            },
+            move |_ctx| {
+                let cnt = counter.clone();
+                async move {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    // Simulates: external mutation succeeded, but then handler threw error reading response
+                    Err(anyhow::anyhow!("timeout reading charge response"))
+                }
+            },
+        );
+
+        let make_request = || QefroRequest {
+            protocol_version: "1".into(),
+            request_id: "req-charge-1".into(),
+            request_type: "tool.invoke".into(),
+            organization_id: Some("tenant-corp".into()),
+            conversation_id: Some("conv-1".into()),
+            channel: Some("whatsapp".into()),
+            identity: None,
+            tool: Some("charge_customer".into()),
+            parameters: Some(json!({"amount": 100})),
+            authentication: None,
+            resume_token: None,
+            challenge_response: None,
+            person: None,
+            platform: None,
+            settings: None,
+        };
+
+        // First attempt: handler executes and returns error; counter -> 1
+        let resp1 = app.handle(make_request()).await;
+        let val1 = serde_json::to_value(&resp1).unwrap();
+        assert_eq!(val1["type"], "error");
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 1);
+
+        // Second attempt with SAME request_id: blocked with UNCERTAIN_OUTCOME, counter STAYS 1!
+        let resp2 = app.handle(make_request()).await;
+        let val2 = serde_json::to_value(&resp2).unwrap();
+        assert_eq!(val2["type"], "error");
+        assert_eq!(val2["code"], "UNCERTAIN_OUTCOME");
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 1, "handler MUST NOT execute a second time after uncertain failure!");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_pre_mutation_failure_allows_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("qefro-idemp-test-{}", Uuid::new_v4()));
+        let mut config = QefroConfig::new("test-secret");
+        config.idempotency_dir = Some(dir.to_string_lossy().into());
+        let app = Qefro::new(config);
+
+        let execution_counter = Arc::new(AtomicUsize::new(0));
+        let counter = execution_counter.clone();
+
+        app.tool(
+            ToolMetadata {
+                name: "validate_and_charge".into(),
+                auth: ToolAuthMode::None,
+                idempotency_supported: Some(true),
+                ..Default::default()
+            },
+            move |_ctx| {
+                let cnt = counter.clone();
+                async move {
+                    let attempt = cnt.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        // Explicitly declare this error happened before any mutation occurred
+                        Err(anyhow::Error::new(PreMutationError::new("Account not ready")))
+                    } else {
+                        Ok(json!({"charged": true}))
+                    }
+                }
+            },
+        );
+
+        let make_request = || QefroRequest {
+            protocol_version: "1".into(),
+            request_id: "req-pre-mut-1".into(),
+            request_type: "tool.invoke".into(),
+            organization_id: Some("tenant-corp".into()),
+            conversation_id: Some("conv-1".into()),
+            channel: Some("whatsapp".into()),
+            identity: None,
+            tool: Some("validate_and_charge".into()),
+            parameters: Some(json!({"amount": 100})),
+            authentication: None,
+            resume_token: None,
+            challenge_response: None,
+            person: None,
+            platform: None,
+            settings: None,
+        };
+
+        // First attempt: fails with PreMutationError
+        let resp1 = app.handle(make_request()).await;
+        let val1 = serde_json::to_value(&resp1).unwrap();
+        assert_eq!(val1["type"], "error");
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 1);
+
+        // Second attempt with SAME request_id: re-claims and executes successfully
+        let resp2 = app.handle(make_request()).await;
+        let val2 = serde_json::to_value(&resp2).unwrap();
+        assert_eq!(val2["type"], "result");
+        assert_eq!(val2["output"]["charged"], true);
+        assert_eq!(execution_counter.load(Ordering::SeqCst), 2);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tool_defaults_to_non_idempotent() {
+        let app = Qefro::new(QefroConfig::new("test-secret"));
+        app.tool(
+            ToolMetadata {
+                name: "default_tool".into(),
+                auth: ToolAuthMode::None,
+                ..Default::default()
+            },
+            |_ctx| async move { Ok(json!({"ok": true})) },
+        );
+
+        let tools = app.list_registered_tools();
+        let t = tools.iter().find(|t| t.name == "default_tool").unwrap();
+        assert_eq!(t.idempotency_supported, None, "idempotency_supported MUST default to None, never true!");
     }
 }
