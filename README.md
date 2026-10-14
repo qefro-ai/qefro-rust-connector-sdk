@@ -1,6 +1,6 @@
-# qefro-backend-sdk
+# qefro-connector-sdk
 
-Qefro backend SDK for connecting **external business systems** to Qefro
+Qefro connector SDK for connecting **external business systems** to Qefro
 (ERP / POS / CRM) over signed `POST /qefro`.
 
 Marketplace Apps do **not** use this crate — they are metadata:
@@ -8,7 +8,7 @@ Marketplace Apps do **not** use this crate — they are metadata:
 
 Organizations expose one signed webhook (typically `POST /qefro`). Qefro Runtime calls `ping`, `capabilities.list`, `tool.invoke`, and `tool.resume`. Authentication stays in your handlers — Qefro only relays challenges.
 
-Companion TypeScript package: [`@qefro-ai/backend`](https://www.npmjs.com/package/@qefro-ai/backend) (feature-parity target).
+Companion TypeScript package: [`@qefro-ai/connector`](https://www.npmjs.com/package/@qefro-ai/connector) (feature-parity target).
 
 `ctx.emit()` publishes durable Business Events (declare them with `app.business_event()`).
 `ctx.person` queues Customer Hub Person mutations. `ctx.storage` talks to managed storage.
@@ -18,18 +18,18 @@ Flow steps include `.message() .tag() .assign() .activity()`.
 
 ```toml
 [dependencies]
-qefro-backend-sdk = "1"
+qefro-connector-sdk = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 ```
 
 ```bash
-cargo add qefro-backend-sdk
+cargo add qefro-connector-sdk
 ```
 
 ## Quick start
 
 ```rust
-use qefro_backend_sdk::{ListenOptions, Qefro, QefroConfig, ToolAuthMode, ToolLookup, ToolMetadata};
+use qefro_connector_sdk::{ListenOptions, Qefro, QefroConfig, ToolAuthMode, ToolLookup, ToolMetadata};
 use serde_json::json;
 
 #[tokio::main]
@@ -116,7 +116,7 @@ the sole path. External CRM auth via `app.customer(provider)` is unchanged.
 Flows describe how your Business Tools are orchestrated. They are **metadata only** — the SDK advertises them through `capabilities.list` and the Qefro Runtime discovers, validates, versions, and executes them. Nothing runs inside the SDK. A flow with a duplicate/empty id (flow or step) is excluded from `capabilities.list` and surfaced through `FlowError` instead of panicking.
 
 ```rust
-use qefro_backend_sdk::BusinessFlowMetadata;
+use qefro_connector_sdk::BusinessFlowMetadata;
 
 app.flow(BusinessFlowMetadata {
     id: "order_lookup".into(),        // immutable identity — renaming `name` never creates a new flow
@@ -142,7 +142,7 @@ Every step needs a unique `id`; `tool` steps reference an existing Business Tool
 - [Register SDK Business Tools](https://docs.qefro.com/docs/guides/register-sdk-business-tools)
 - [Define Business Flows](https://docs.qefro.com/docs/guides/define-business-flows)
 - [Run Business Flows](https://docs.qefro.com/docs/guides/run-business-flows)
-- [docs.rs/qefro-backend-sdk](https://docs.rs/qefro-backend-sdk)
+- [docs.rs/qefro-connector-sdk](https://docs.rs/qefro-connector-sdk)
 
 ## Protocol
 

@@ -1,6 +1,6 @@
 # Basic Rust SDK example
 
-Minimal `qefro-backend-sdk` handler for Sync Tools / Test Connection.
+Minimal `qefro-connector-sdk` handler for Sync Tools / Test Connection.
 
 ## Install
 
@@ -8,7 +8,7 @@ From crates.io (recommended):
 
 ```toml
 [dependencies]
-qefro-backend-sdk = "1"
+qefro-connector-sdk = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 serde_json = "1"
 anyhow = "1"

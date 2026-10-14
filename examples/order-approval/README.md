@@ -1,6 +1,6 @@
 # Order approval Rust SDK example
 
-Runtime Business Flows end to end with `qefro-backend-sdk`: `ask`, `condition`
+Runtime Business Flows end to end with `qefro-connector-sdk`: `ask`, `condition`
 branching, human `approval`, and an OTP-authenticated `tool` step. Mirrors the
 JS SDK's `examples/order-approval`.
 

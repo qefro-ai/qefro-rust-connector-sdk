@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use qefro_backend_sdk::{
+use qefro_connector_sdk::{
     AuthBuilder, AuthenticationContextPayload, BusinessFlowMetadata, CustomerAuthorizeContext,
     CustomerLookupContext, CustomerProvider, ListenOptions, Qefro, QefroConfig, ToolAuthMode,
     ToolMetadata,
@@ -78,7 +78,7 @@ impl CustomerProvider for DemoCustomer {
         Ok(Some(json!({ "id": id })))
     }
 
-    async fn authorize(&self, ctx: &CustomerAuthorizeContext) -> Result<qefro_backend_sdk::AuthOutcome> {
+    async fn authorize(&self, ctx: &CustomerAuthorizeContext) -> Result<qefro_connector_sdk::AuthOutcome> {
         let auth = AuthBuilder::new(ctx.response.clone());
         match ctx.response.as_deref().map(str::trim) {
             None => Ok(auth.sms_otp(

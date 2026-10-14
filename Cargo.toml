@@ -1,13 +1,13 @@
 [package]
-name = "qefro-backend-sdk"
+name = "qefro-connector-sdk"
 version = "1.5.0"
 edition = "2021"
-description = "Qefro backend framework for business tool handlers and customer authorization orchestration"
+description = "Qefro connector framework for business tool handlers and customer authorization orchestration"
 license = "MIT"
 readme = "README.md"
 homepage = "https://docs.qefro.com/docs/guides/register-sdk-business-tools"
-repository = "https://github.com/qefro-ai/qefro-rust-backend-sdk"
-documentation = "https://docs.rs/qefro-backend-sdk"
+repository = "https://github.com/qefro-ai/qefro-rust-connector-sdk"
+documentation = "https://docs.rs/qefro-connector-sdk"
 keywords = ["qefro", "ai", "sdk", "business-tools", "customer-support"]
 categories = ["web-programming", "api-bindings"]
 rust-version = "1.70"

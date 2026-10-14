@@ -1,4 +1,4 @@
-//! Qefro backend SDK — mirrors `@qefro-ai/backend` (TypeScript).
+//! Qefro connector SDK — mirrors `@qefro-ai/connector` (TypeScript).
 //!
 //! Organizations expose one signed webhook (typically `POST /qefro`).
 //! Qefro Runtime calls `ping`, `tools.list`, `tool.invoke`, and `tool.resume`.
@@ -69,7 +69,7 @@ use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Package name reported to Qefro Runtime (`X-Qefro-SDK` / protocol payloads).
-pub const SDK_NAME: &str = "qefro-backend-sdk";
+pub const SDK_NAME: &str = "qefro-connector-sdk";
 /// Package version reported to Qefro Runtime (`sdk_version` / `X-Qefro-Version`).
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
