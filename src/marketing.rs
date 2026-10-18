@@ -31,7 +31,11 @@ fn err(msg: impl Into<String>) -> MarketingError {
 pub struct MarketingAudienceCustomerHub {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "consentPurpose")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "consentPurpose"
+    )]
     pub consent_purpose: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attrs: Option<Value>,
@@ -51,11 +55,19 @@ pub struct MarketingAudience {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "customerHub")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "customerHub"
+    )]
     pub customer_hub: Option<MarketingAudienceCustomerHub>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "appQuery")]
     pub app_query: Option<MarketingAudienceAppQuery>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "staticFilter")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "staticFilter"
+    )]
     pub static_filter: Option<Value>,
 }
 
@@ -77,9 +89,17 @@ pub struct MarketingAction {
     pub id: String,
     pub label: String,
     pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "landingPageId")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "landingPageId"
+    )]
     pub landing_page_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "urlTemplate")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "urlTemplate"
+    )]
     pub url_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
@@ -116,7 +136,11 @@ pub struct MarketingDefinition {
     pub variables: Vec<MarketingVariable>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<MarketingAction>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "landingPages")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "landingPages"
+    )]
     pub landing_pages: Vec<MarketingLandingPage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<MarketingChannel>,
@@ -154,7 +178,13 @@ pub struct MarketingCapability {
 const AUDIENCE_SOURCES: &[&str] = &["customer_hub", "app_query", "static_filter"];
 const VARIABLE_TYPES: &[&str] = &["string", "number", "datetime", "boolean", "url", "currency"];
 const VARIABLE_SOURCES: &[&str] = &["customer_hub", "app_context", "campaign", "literal"];
-const ACTION_KINDS: &[&str] = &["url", "deep_link", "quick_reply", "whatsapp_cta", "postback"];
+const ACTION_KINDS: &[&str] = &[
+    "url",
+    "deep_link",
+    "quick_reply",
+    "whatsapp_cta",
+    "postback",
+];
 const LANDING_HOSTS: &[&str] = &["app", "platform"];
 
 fn require_non_empty(value: &str, path: &str) -> Result<String, MarketingError> {
@@ -175,7 +205,10 @@ fn assert_unique_ids(ids: &[String], kind: &str) -> Result<(), MarketingError> {
     Ok(())
 }
 
-fn validate_audience(a: &MarketingAudience, index: usize) -> Result<MarketingAudience, MarketingError> {
+fn validate_audience(
+    a: &MarketingAudience,
+    index: usize,
+) -> Result<MarketingAudience, MarketingError> {
     let id = require_non_empty(&a.id, &format!("audiences[{index}].id"))?;
     let label = require_non_empty(&a.label, &format!("audiences[{index}].label"))?;
     let source = require_non_empty(&a.source, &format!("audiences[{index}].source"))?;
@@ -207,7 +240,10 @@ fn validate_audience(a: &MarketingAudience, index: usize) -> Result<MarketingAud
     Ok(out)
 }
 
-fn validate_variable(v: &MarketingVariable, index: usize) -> Result<MarketingVariable, MarketingError> {
+fn validate_variable(
+    v: &MarketingVariable,
+    index: usize,
+) -> Result<MarketingVariable, MarketingError> {
     let id = require_non_empty(&v.id, &format!("variables[{index}].id"))?;
     let label = require_non_empty(&v.label, &format!("variables[{index}].label"))?;
     let var_type = require_non_empty(&v.var_type, &format!("variables[{index}].type"))?;
@@ -284,7 +320,10 @@ fn validate_landing_page(
     })
 }
 
-fn validate_channel(c: &MarketingChannel, index: usize) -> Result<MarketingChannel, MarketingError> {
+fn validate_channel(
+    c: &MarketingChannel,
+    index: usize,
+) -> Result<MarketingChannel, MarketingError> {
     let id = require_non_empty(&c.id, &format!("channels[{index}].id"))?;
     Ok(MarketingChannel {
         id,

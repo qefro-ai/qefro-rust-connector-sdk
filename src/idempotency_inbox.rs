@@ -108,7 +108,9 @@ pub fn default_inbox_dir(signing_secret: &str) -> PathBuf {
     }
     let digest = Sha256::digest(signing_secret.as_bytes());
     let shard = hex::encode(&digest[..4]); // 8 hex chars
-    std::env::temp_dir().join("qefro-idempotency-inbox").join(shard)
+    std::env::temp_dir()
+        .join("qefro-idempotency-inbox")
+        .join(shard)
 }
 
 fn file_name_for(tool: &str, request_id: &str) -> String {
@@ -178,7 +180,9 @@ impl IdempotencyInbox {
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "default".to_string());
-        self.dir.join(tenant_folder).join(file_name_for(tool, request_id))
+        self.dir
+            .join(tenant_folder)
+            .join(file_name_for(tool, request_id))
     }
 
     /// Try to atomically claim this request_id.
@@ -207,11 +211,7 @@ impl IdempotencyInbox {
         let bytes = serde_json::to_vec_pretty(&record)?;
 
         // Try atomic file creation via O_CREAT | O_EXCL
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 file.write_all(&bytes)?;
                 file.sync_all()?;
@@ -238,16 +238,26 @@ impl IdempotencyInbox {
                             Ok(ClaimResult::ConcurrentExecution)
                         } else {
                             // Abandoned / crash recovery window expired -> persist as UncertainOutcome
-                            let _ = self.update_status(tenant_id, tool, request_id, InboxStatus::UncertainOutcome, None);
+                            let _ = self.update_status(
+                                tenant_id,
+                                tool,
+                                request_id,
+                                InboxStatus::UncertainOutcome,
+                                None,
+                            );
                             Ok(ClaimResult::UncertainCrash(existing))
                         }
                     }
-                    InboxStatus::UncertainOutcome => {
-                        Ok(ClaimResult::UncertainCrash(existing))
-                    }
+                    InboxStatus::UncertainOutcome => Ok(ClaimResult::UncertainCrash(existing)),
                     InboxStatus::FailedRetryable => {
                         // Previous attempt definitely failed before mutation; allow retry by taking over the record
-                        self.update_status(tenant_id, tool, request_id, InboxStatus::Executing, None)?;
+                        self.update_status(
+                            tenant_id,
+                            tool,
+                            request_id,
+                            InboxStatus::Executing,
+                            None,
+                        )?;
                         Ok(ClaimResult::Claimed)
                     }
                 }
@@ -264,7 +274,13 @@ impl IdempotencyInbox {
         request_id: &str,
         response: Value,
     ) -> Result<()> {
-        self.update_status(tenant_id, tool, request_id, InboxStatus::Completed, Some(response))
+        self.update_status(
+            tenant_id,
+            tool,
+            request_id,
+            InboxStatus::Completed,
+            Some(response),
+        )
     }
 
     /// Mark an execution as failed before any mutation occurred (safe to retry).
@@ -274,7 +290,13 @@ impl IdempotencyInbox {
         tool: &str,
         request_id: &str,
     ) -> Result<()> {
-        self.update_status(tenant_id, tool, request_id, InboxStatus::FailedRetryable, None)
+        self.update_status(
+            tenant_id,
+            tool,
+            request_id,
+            InboxStatus::FailedRetryable,
+            None,
+        )
     }
 
     /// Mark an execution as having an uncertain outcome (in-flight error / post-start failure).
@@ -285,16 +307,17 @@ impl IdempotencyInbox {
         tool: &str,
         request_id: &str,
     ) -> Result<()> {
-        self.update_status(tenant_id, tool, request_id, InboxStatus::UncertainOutcome, None)
+        self.update_status(
+            tenant_id,
+            tool,
+            request_id,
+            InboxStatus::UncertainOutcome,
+            None,
+        )
     }
 
     /// Mark an execution as failed (defaults to fail_uncertain to fail closed).
-    pub fn fail(
-        &self,
-        tenant_id: Option<&str>,
-        tool: &str,
-        request_id: &str,
-    ) -> Result<()> {
+    pub fn fail(&self, tenant_id: Option<&str>, tool: &str, request_id: &str) -> Result<()> {
         self.fail_uncertain(tenant_id, tool, request_id)
     }
 
@@ -394,23 +417,34 @@ mod tests {
         let req_id = "req-101";
 
         // First claim succeeds
-        match inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap() {
+        match inbox
+            .claim(Some("tenant-1"), "order_cancel", req_id)
+            .unwrap()
+        {
             ClaimResult::Claimed => {}
             other => panic!("expected Claimed, got {:?}", other),
         }
 
         // Concurrent claim while executing returns ConcurrentExecution
-        match inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap() {
+        match inbox
+            .claim(Some("tenant-1"), "order_cancel", req_id)
+            .unwrap()
+        {
             ClaimResult::ConcurrentExecution => {}
             other => panic!("expected ConcurrentExecution, got {:?}", other),
         }
 
         // Complete with response
         let resp = serde_json::json!({"order_id": "ORD-1", "canceled": true});
-        inbox.complete(Some("tenant-1"), "order_cancel", req_id, resp.clone()).unwrap();
+        inbox
+            .complete(Some("tenant-1"), "order_cancel", req_id, resp.clone())
+            .unwrap();
 
         // Subsequent claim returns Cached
-        match inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap() {
+        match inbox
+            .claim(Some("tenant-1"), "order_cancel", req_id)
+            .unwrap()
+        {
             ClaimResult::Cached(cached) => {
                 assert_eq!(cached, resp);
             }
@@ -427,13 +461,18 @@ mod tests {
         let req_id = "req-crashed";
 
         // First claim
-        inbox.claim(Some("tenant-1"), "charge_card", req_id).unwrap();
+        inbox
+            .claim(Some("tenant-1"), "charge_card", req_id)
+            .unwrap();
 
         // Small sleep so duration > 0s
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Re-claiming after crash window returns UncertainCrash
-        match inbox.claim(Some("tenant-1"), "charge_card", req_id).unwrap() {
+        match inbox
+            .claim(Some("tenant-1"), "charge_card", req_id)
+            .unwrap()
+        {
             ClaimResult::UncertainCrash(record) => {
                 assert_eq!(record.request_id, req_id);
                 assert_eq!(record.tool, "charge_card");
@@ -451,7 +490,14 @@ mod tests {
 
         // Tenant A claims
         inbox.claim(Some("tenant-a"), "action_a", req_id).unwrap();
-        inbox.complete(Some("tenant-a"), "action_a", req_id, serde_json::json!({"t": "a"})).unwrap();
+        inbox
+            .complete(
+                Some("tenant-a"),
+                "action_a",
+                req_id,
+                serde_json::json!({"t": "a"}),
+            )
+            .unwrap();
 
         // Tenant B with same request_id does NOT collide with Tenant A
         match inbox.claim(Some("tenant-b"), "action_b", req_id).unwrap() {
@@ -469,16 +515,22 @@ mod tests {
 
         // Claim succeeds
         assert!(matches!(
-            inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap(),
+            inbox
+                .claim(Some("tenant-1"), "order_cancel", req_id)
+                .unwrap(),
             ClaimResult::Claimed
         ));
 
         // Mark as failed_retryable (e.g. before_hooks failed)
-        inbox.fail_retryable(Some("tenant-1"), "order_cancel", req_id).unwrap();
+        inbox
+            .fail_retryable(Some("tenant-1"), "order_cancel", req_id)
+            .unwrap();
 
         // Re-claiming succeeds because failure was verified pre-mutation
         assert!(matches!(
-            inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap(),
+            inbox
+                .claim(Some("tenant-1"), "order_cancel", req_id)
+                .unwrap(),
             ClaimResult::Claimed
         ));
 
@@ -492,16 +544,22 @@ mod tests {
 
         // Claim succeeds
         assert!(matches!(
-            inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap(),
+            inbox
+                .claim(Some("tenant-1"), "order_cancel", req_id)
+                .unwrap(),
             ClaimResult::Claimed
         ));
 
         // Mark as fail_uncertain (in-flight error / unhandled handler failure)
-        inbox.fail_uncertain(Some("tenant-1"), "order_cancel", req_id).unwrap();
+        inbox
+            .fail_uncertain(Some("tenant-1"), "order_cancel", req_id)
+            .unwrap();
 
         // Re-claiming fails closed with UncertainCrash to prevent duplicate mutation
         assert!(matches!(
-            inbox.claim(Some("tenant-1"), "order_cancel", req_id).unwrap(),
+            inbox
+                .claim(Some("tenant-1"), "order_cancel", req_id)
+                .unwrap(),
             ClaimResult::UncertainCrash(_)
         ));
 
@@ -522,6 +580,9 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             default_inbox_dir("secret");
         });
-        assert!(result.is_err(), "default_inbox_dir must panic in production without persistent dir!");
+        assert!(
+            result.is_err(),
+            "default_inbox_dir must panic in production without persistent dir!"
+        );
     }
 }

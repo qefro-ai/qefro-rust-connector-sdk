@@ -147,12 +147,7 @@ pub fn normalize_emitted_event(
         Some(v) if v > 0 => v,
         _ => declared.map(|d| d.version).filter(|v| *v > 0).unwrap_or(1),
     };
-    let raw_id = event
-        .event_id
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let raw_id = event.event_id.as_deref().unwrap_or("").trim().to_string();
     let event_id = if raw_id.is_empty() {
         format!("evt_{}", Uuid::new_v4())
     } else {

@@ -18,15 +18,15 @@ pub use business_events::{
 };
 pub use customer_hub::{
     env_flag_true, hub_call, hub_customer_from_person, is_customer_hub_enabled,
-    is_customer_hub_optional, pick_identity, read_identity_phone, seed_from_person,
-    ConsentContext, CustomerState, MembershipContext, PlatformCapabilities,
-    PlatformCustomerBinding, PlatformCustomerContext, PlatformStorageBinding,
-    PlatformStorageContext, TimelineContext,
+    is_customer_hub_optional, pick_identity, read_identity_phone, seed_from_person, ConsentContext,
+    CustomerState, MembershipContext, PlatformCapabilities, PlatformCustomerBinding,
+    PlatformCustomerContext, PlatformStorageBinding, PlatformStorageContext, TimelineContext,
 };
 pub use event_outbox::{default_outbox_dir, EventOutbox};
 pub use idempotency_inbox::{
     default_inbox_dir, is_pre_mutation_error, is_production_env, ClaimResult, IdempotencyInbox,
-    InboxRecord, InboxStatus, PreMutationError, DEFAULT_CRASH_WINDOW_SECS, DEFAULT_RETENTION_TTL_DAYS,
+    InboxRecord, InboxStatus, PreMutationError, DEFAULT_CRASH_WINDOW_SECS,
+    DEFAULT_RETENTION_TTL_DAYS,
 };
 pub use marketing::{
     build_marketing_context, is_marketing_enabled, to_marketing_capability,
@@ -89,7 +89,8 @@ type MiddlewareFn = Arc<
         + Send
         + Sync,
 >;
-type NextFn = Box<dyn FnOnce(ToolContext) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send>;
+type NextFn =
+    Box<dyn FnOnce(ToolContext) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send>;
 
 #[derive(Debug, Clone)]
 pub struct QefroConfig {
@@ -272,7 +273,9 @@ pub enum FlowTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         when: Option<String>,
     },
-    Schedule { cron: String },
+    Schedule {
+        cron: String,
+    },
     Webhook {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -297,9 +300,7 @@ impl FlowTrigger {
                         "trigger.event must be namespaced (e.g. shopify.order.created)".into(),
                     ));
                 }
-                let when = when
-                    .map(|w| w.trim().to_string())
-                    .filter(|w| !w.is_empty());
+                let when = when.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
                 Ok(FlowTrigger::Event { event, when })
             }
             FlowTrigger::Schedule { cron } => {
@@ -312,12 +313,8 @@ impl FlowTrigger {
                 Ok(FlowTrigger::Schedule { cron })
             }
             FlowTrigger::Webhook { name, when } => {
-                let name = name
-                    .map(|n| n.trim().to_string())
-                    .filter(|n| !n.is_empty());
-                let when = when
-                    .map(|w| w.trim().to_string())
-                    .filter(|w| !w.is_empty());
+                let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                let when = when.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
                 Ok(FlowTrigger::Webhook { name, when })
             }
         }
@@ -668,11 +665,7 @@ impl AuthBuilder {
         Self { response }
     }
 
-    pub fn success(
-        &self,
-        customer: Value,
-        mut auth: AuthenticationContextPayload,
-    ) -> AuthOutcome {
+    pub fn success(&self, customer: Value, mut auth: AuthenticationContextPayload) -> AuthOutcome {
         if auth.customer_id.is_none() {
             auth.customer_id = customer
                 .get("id")
@@ -784,7 +777,12 @@ pub struct FlowBuilder {
 }
 
 impl FlowBuilder {
-    pub fn ask(self, id: impl Into<String>, field: impl Into<String>, prompt: impl Into<String>) -> Self {
+    pub fn ask(
+        self,
+        id: impl Into<String>,
+        field: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
         self.push(
             id.into(),
             FlowStepKind::Ask {
@@ -865,7 +863,12 @@ impl FlowBuilder {
         )
     }
 
-    pub fn tag(self, id: impl Into<String>, name: impl Into<String>, color: Option<String>) -> Self {
+    pub fn tag(
+        self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        color: Option<String>,
+    ) -> Self {
         self.push(
             id.into(),
             FlowStepKind::Tag {
@@ -892,7 +895,12 @@ impl FlowBuilder {
         )
     }
 
-    pub fn assign(self, id: impl Into<String>, to: impl Into<String>, handoff: Option<bool>) -> Self {
+    pub fn assign(
+        self,
+        id: impl Into<String>,
+        to: impl Into<String>,
+        handoff: Option<bool>,
+    ) -> Self {
         self.push(
             id.into(),
             FlowStepKind::Assign {
@@ -1032,7 +1040,10 @@ impl CustomerApi {
             if let Some(ch) = self.channel.as_ref() {
                 obj.insert("channel".into(), json!(ch));
             }
-            obj.insert("conversation_id".into(), json!(self.conversation_id.to_string()));
+            obj.insert(
+                "conversation_id".into(),
+                json!(self.conversation_id.to_string()),
+            );
         }
         let out = hub_call(self.platform.as_ref(), "resolve", body).await?;
         let hub = hub_customer_from_person(out.as_ref());
@@ -1410,8 +1421,11 @@ impl Qefro {
     where
         P: CustomerProvider + 'static,
     {
-        *self.inner.customer_provider.write().expect("customer_provider") =
-            Some(Arc::new(provider));
+        *self
+            .inner
+            .customer_provider
+            .write()
+            .expect("customer_provider") = Some(Arc::new(provider));
         self
     }
 
@@ -1470,10 +1484,7 @@ impl Qefro {
     {
         let name = metadata.name.clone();
         let lookup = normalized_lookup_field(metadata.lookup.as_ref());
-        let metadata = ToolMetadata {
-            lookup,
-            ..metadata
-        };
+        let metadata = ToolMetadata { lookup, ..metadata };
         let registration = ToolRegistration {
             metadata,
             handler: Arc::new(move |ctx| Box::pin(handler(ctx))),
@@ -1490,7 +1501,10 @@ impl Qefro {
     /// through `capabilities.list` and the Qefro Runtime orchestrates execution.
     ///
     /// Returns [`FlowError`] on a duplicate or empty flow id — the SDK never panics.
-    pub fn flow(&self, metadata: BusinessFlowMetadata) -> std::result::Result<FlowBuilder, FlowError> {
+    pub fn flow(
+        &self,
+        metadata: BusinessFlowMetadata,
+    ) -> std::result::Result<FlowBuilder, FlowError> {
         let id = metadata.id.trim().to_string();
         if id.is_empty() {
             return Err(FlowError::EmptyFlowId);
@@ -1501,7 +1515,11 @@ impl Qefro {
                 return Err(FlowError::DuplicateFlowId(id));
             }
         }
-        let version = if metadata.version == 0 { 1 } else { metadata.version };
+        let version = if metadata.version == 0 {
+            1
+        } else {
+            metadata.version
+        };
         let trigger = match metadata.trigger.clone() {
             Some(t) => Some(t.normalize()?),
             None => None,
@@ -1576,11 +1594,7 @@ impl Qefro {
     fn list_named_handlers(
         lock: &RwLock<HashMap<String, EventHandlerDefinition>>,
     ) -> Vec<EventHandlerDefinition> {
-        lock.read()
-            .expect("handlers")
-            .values()
-            .cloned()
-            .collect()
+        lock.read().expect("handlers").values().cloned().collect()
     }
 
     /// Snapshot the valid registered flows for `capabilities.list`. Flows with a
@@ -1591,7 +1605,10 @@ impl Qefro {
             .values()
             .filter_map(|reg| {
                 if let Some(err) = &reg.error {
-                    eprintln!("[qefro] skipping invalid flow \"{}\": {err}", reg.metadata.id);
+                    eprintln!(
+                        "[qefro] skipping invalid flow \"{}\": {err}",
+                        reg.metadata.id
+                    );
                     None
                 } else {
                     Some(BusinessFlow {
@@ -1640,7 +1657,11 @@ impl Qefro {
             + 'static,
     {
         let mw: MiddlewareFn = Arc::new(middleware);
-        self.inner.middlewares.write().expect("middlewares").push(mw);
+        self.inner
+            .middlewares
+            .write()
+            .expect("middlewares")
+            .push(mw);
         self
     }
 
@@ -1683,7 +1704,11 @@ impl Qefro {
         self.handle_with_trace(request, None).await
     }
 
-    pub(crate) async fn handle_with_trace(&self, request: QefroRequest, trace_id: Option<String>) -> QefroResponse {
+    pub(crate) async fn handle_with_trace(
+        &self,
+        request: QefroRequest,
+        trace_id: Option<String>,
+    ) -> QefroResponse {
         if request.protocol_version != self.inner.config.protocol_version {
             return QefroResponse::Error {
                 code: "protocol_mismatch".into(),
@@ -1811,14 +1836,10 @@ impl Qefro {
     }
 
     /// Verify signature + protocol headers, then handle (mirrors JS `handleRaw`).
-    pub async fn handle_raw(
-        &self,
-        body: &str,
-        headers: &HeaderMap,
-    ) -> (StatusCode, QefroResponse) {
+    pub async fn handle_raw(&self, body: &str, headers: &HeaderMap) -> (StatusCode, QefroResponse) {
         let signature = header_str(headers, "x-qefro-signature");
-        let timestamp = header_str(headers, "x-qefro-timestamp")
-            .and_then(|t| t.parse::<i64>().ok());
+        let timestamp =
+            header_str(headers, "x-qefro-timestamp").and_then(|t| t.parse::<i64>().ok());
 
         let protocol_header = header_str(headers, "x-qefro-protocol")
             .or_else(|| header_str(headers, "x-qefro-protocol-version"));
@@ -1894,9 +1915,7 @@ impl Qefro {
 
     /// Start an HTTP server (mirrors JS `listen`).
     pub async fn listen(&self, options: ListenOptions) -> Result<ListenHandle> {
-        let host = options
-            .host
-            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let host = options.host.unwrap_or_else(|| "0.0.0.0".to_string());
         let path = options
             .path
             .unwrap_or_else(|| self.inner.config.endpoint_path.clone());
@@ -1966,10 +1985,7 @@ impl Qefro {
             };
         };
 
-        let idempotency_enabled = registration
-            .metadata
-            .idempotency_supported
-            .unwrap_or(false);
+        let idempotency_enabled = registration.metadata.idempotency_supported.unwrap_or(false);
 
         if idempotency_enabled && !request_id.is_empty() {
             match self
@@ -2007,7 +2023,12 @@ impl Qefro {
                 }
                 Ok(ClaimResult::Claimed) => {}
                 Err(e) => {
-                    let _ = e;
+                    return QefroResponse::Error {
+                        code: "IDEMPOTENCY_STORE_UNAVAILABLE".into(),
+                        message: format!(
+                            "Idempotency store unavailable for tool '{tool_name}': {e}"
+                        ),
+                    };
                 }
             }
         }
@@ -2160,11 +2181,20 @@ impl Qefro {
             emit,
         };
 
-        let before_hooks = self.inner.before_hooks.read().expect("before_hooks").clone();
+        let before_hooks = self
+            .inner
+            .before_hooks
+            .read()
+            .expect("before_hooks")
+            .clone();
         for hook in &before_hooks {
             if let Err(e) = hook(ctx.clone()).await {
                 if idempotency_enabled && !request_id.is_empty() {
-                    let _ = self.inner.inbox.fail_retryable(tenant_id.as_deref(), &tool_name, &request_id);
+                    let _ = self.inner.inbox.fail_retryable(
+                        tenant_id.as_deref(),
+                        &tool_name,
+                        &request_id,
+                    );
                 }
                 return map_invoke_error(
                     e,
@@ -2191,9 +2221,17 @@ impl Qefro {
             Err(e) => {
                 if idempotency_enabled && !request_id.is_empty() {
                     if is_pre_mutation_error(&e) {
-                        let _ = self.inner.inbox.fail_retryable(tenant_id.as_deref(), &tool_name, &request_id);
+                        let _ = self.inner.inbox.fail_retryable(
+                            tenant_id.as_deref(),
+                            &tool_name,
+                            &request_id,
+                        );
                     } else {
-                        let _ = self.inner.inbox.fail_uncertain(tenant_id.as_deref(), &tool_name, &request_id);
+                        let _ = self.inner.inbox.fail_uncertain(
+                            tenant_id.as_deref(),
+                            &tool_name,
+                            &request_id,
+                        );
                     }
                 }
                 return map_invoke_error(
@@ -2219,7 +2257,11 @@ impl Qefro {
                 Ok(v) => output = v,
                 Err(e) => {
                     if idempotency_enabled && !request_id.is_empty() {
-                        let _ = self.inner.inbox.fail_uncertain(tenant_id.as_deref(), &tool_name, &request_id);
+                        let _ = self.inner.inbox.fail_uncertain(
+                            tenant_id.as_deref(),
+                            &tool_name,
+                            &request_id,
+                        );
                     }
                     return map_invoke_error(
                         e,
@@ -2255,15 +2297,21 @@ impl Qefro {
             } else {
                 Some(mutations)
             },
-            events: if events.is_empty() { None } else { Some(events) },
+            events: if events.is_empty() {
+                None
+            } else {
+                Some(events)
+            },
         };
 
         if idempotency_enabled && !request_id.is_empty() {
             if let Ok(resp_json) = serde_json::to_value(&response) {
-                let _ = self
-                    .inner
-                    .inbox
-                    .complete(tenant_id.as_deref(), &tool_name, &request_id, resp_json);
+                let _ = self.inner.inbox.complete(
+                    tenant_id.as_deref(),
+                    &tool_name,
+                    &request_id,
+                    resp_json,
+                );
             }
         }
 
@@ -2580,10 +2628,7 @@ fn protocol_response_headers(app: &Qefro) -> HeaderMap {
     headers.insert("X-Qefro-Protocol", proto.clone());
     headers.insert("X-Qefro-Protocol-Version", proto);
     headers.insert("X-Qefro-SDK", HeaderValue::from_static(SDK_NAME));
-    headers.insert(
-        "X-Qefro-Version",
-        HeaderValue::from_static(SDK_VERSION),
-    );
+    headers.insert("X-Qefro-Version", HeaderValue::from_static(SDK_VERSION));
     headers
 }
 
@@ -2802,10 +2847,7 @@ mod tests {
         let resp = app.handle(capabilities_request()).await;
         let value = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(value["type"], "capabilities.list");
-        assert_eq!(
-            value["flows"][0]["metadata"]["trigger"]["type"],
-            "event"
-        );
+        assert_eq!(value["flows"][0]["metadata"]["trigger"]["type"], "event");
         assert_eq!(
             value["flows"][0]["metadata"]["trigger"]["event"],
             "shopify.cart.abandoned"
@@ -3073,13 +3115,9 @@ mod tests {
                 ..Default::default()
             },
             |ctx| async move {
-                ctx.timeline
-                    .append(json!({"event_type": "x.y"}))
-                    .await?;
+                ctx.timeline.append(json!({"event_type": "x.y"})).await?;
                 ctx.membership.attach(None).await?;
-                ctx.consent
-                    .grant(json!({"purpose": "marketing"}))
-                    .await?;
+                ctx.consent.grant(json!({"purpose": "marketing"})).await?;
                 Ok(json!({"ok": true}))
             },
         );
@@ -3259,7 +3297,10 @@ mod tests {
                 _ => "other",
             })
             .collect();
-        assert_eq!(types, vec!["message", "tag", "assign", "activity", "complete"]);
+        assert_eq!(
+            types,
+            vec!["message", "tag", "assign", "activity", "complete"]
+        );
     }
 
     #[tokio::test]
@@ -3322,9 +3363,73 @@ mod tests {
         let val2 = serde_json::to_value(&resp2).unwrap();
         assert_eq!(val2["type"], "result");
         assert_eq!(val2["output"]["canceled"], true);
-        assert_eq!(execution_counter.load(Ordering::SeqCst), 1, "handler MUST NOT execute a second time!");
+        assert_eq!(
+            execution_counter.load(Ordering::SeqCst),
+            1,
+            "handler MUST NOT execute a second time!"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_store_failure_does_not_run_the_handler() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("qefro-idemp-store-{}", Uuid::new_v4()));
+        let mut config = QefroConfig::new("test-secret");
+        config.idempotency_dir = Some(dir.to_string_lossy().into());
+        let app = Qefro::new(config);
+
+        let execution_counter = Arc::new(AtomicUsize::new(0));
+        let counter = execution_counter.clone();
+        app.tool(
+            ToolMetadata {
+                name: "charge_customer".into(),
+                auth: ToolAuthMode::None,
+                idempotency_supported: Some(true),
+                ..Default::default()
+            },
+            move |_ctx| {
+                let cnt = counter.clone();
+                async move {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({ "charged": true }))
+                }
+            },
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+
+        let resp = app
+            .handle(QefroRequest {
+                protocol_version: "1".into(),
+                request_id: "req-store-down".into(),
+                request_type: "tool.invoke".into(),
+                organization_id: Some("tenant-corp".into()),
+                conversation_id: Some("conv-1".into()),
+                channel: Some("whatsapp".into()),
+                identity: None,
+                tool: Some("charge_customer".into()),
+                parameters: Some(json!({})),
+                authentication: None,
+                resume_token: None,
+                challenge_response: None,
+                person: None,
+                platform: None,
+                settings: None,
+            })
+            .await;
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "IDEMPOTENCY_STORE_UNAVAILABLE");
+        assert_eq!(
+            execution_counter.load(Ordering::SeqCst),
+            0,
+            "handler must not run when the idempotency claim fails"
+        );
+        let _ = std::fs::remove_file(dir);
     }
 
     #[tokio::test]
@@ -3385,7 +3490,11 @@ mod tests {
         let val2 = serde_json::to_value(&resp2).unwrap();
         assert_eq!(val2["type"], "error");
         assert_eq!(val2["code"], "UNCERTAIN_OUTCOME");
-        assert_eq!(execution_counter.load(Ordering::SeqCst), 1, "handler MUST NOT execute a second time after uncertain failure!");
+        assert_eq!(
+            execution_counter.load(Ordering::SeqCst),
+            1,
+            "handler MUST NOT execute a second time after uncertain failure!"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3415,7 +3524,9 @@ mod tests {
                     let attempt = cnt.fetch_add(1, Ordering::SeqCst);
                     if attempt == 0 {
                         // Explicitly declare this error happened before any mutation occurred
-                        Err(anyhow::Error::new(PreMutationError::new("Account not ready")))
+                        Err(anyhow::Error::new(PreMutationError::new(
+                            "Account not ready",
+                        )))
                     } else {
                         Ok(json!({"charged": true}))
                     }
@@ -3471,6 +3582,9 @@ mod tests {
 
         let tools = app.list_registered_tools();
         let t = tools.iter().find(|t| t.name == "default_tool").unwrap();
-        assert_eq!(t.idempotency_supported, None, "idempotency_supported MUST default to None, never true!");
+        assert_eq!(
+            t.idempotency_supported, None,
+            "idempotency_supported MUST default to None, never true!"
+        );
     }
 }

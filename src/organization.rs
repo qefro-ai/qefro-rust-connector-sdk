@@ -34,7 +34,11 @@ pub struct OrganizationEvent {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "payloadSchema")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "payloadSchema"
+    )]
     pub payload_schema: Option<Value>,
 }
 
@@ -45,9 +49,17 @@ pub struct OrganizationAction {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "inputSchema")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "inputSchema"
+    )]
     pub input_schema: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "outputSchema")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "outputSchema"
+    )]
     pub output_schema: Option<Value>,
 }
 
@@ -63,7 +75,11 @@ pub struct OrganizationTaskType {
         rename = "suggested_workspace_type"
     )]
     pub suggested_workspace_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "suggested_team")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "suggested_team"
+    )]
     pub suggested_team: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
@@ -108,7 +124,9 @@ pub struct OrganizationCapability {
 fn require_non_empty(value: &str, path: &str) -> Result<String, OrganizationError> {
     let t = value.trim();
     if t.is_empty() {
-        return Err(err(format!("organization: {path} must be a non-empty string")));
+        return Err(err(format!(
+            "organization: {path} must be a non-empty string"
+        )));
     }
     Ok(t.to_string())
 }

@@ -116,10 +116,13 @@ impl PersonContext {
         if trimmed.is_empty() {
             return Err(anyhow!("person_note_empty"));
         }
-        self.mutations.lock().expect("mutations").push(PersonMutation::Note {
-            content: trimmed.to_string(),
-            author_id,
-        });
+        self.mutations
+            .lock()
+            .expect("mutations")
+            .push(PersonMutation::Note {
+                content: trimmed.to_string(),
+                author_id,
+            });
         Ok(())
     }
 
@@ -129,10 +132,13 @@ impl PersonContext {
         if trimmed.is_empty() {
             return Err(anyhow!("person_tag_empty"));
         }
-        self.mutations.lock().expect("mutations").push(PersonMutation::Tag {
-            name: trimmed.to_string(),
-            color: color.clone(),
-        });
+        self.mutations
+            .lock()
+            .expect("mutations")
+            .push(PersonMutation::Tag {
+                name: trimmed.to_string(),
+                color: color.clone(),
+            });
         let mut current = self.current.lock().expect("person");
         if let Some(Value::Object(obj)) = current.as_mut() {
             let mut tags = obj
@@ -174,10 +180,13 @@ impl PersonContext {
         if trimmed.is_empty() {
             return Err(anyhow!("person_assign_empty"));
         }
-        self.mutations.lock().expect("mutations").push(PersonMutation::Assign {
-            to: trimmed.to_string(),
-            handoff,
-        });
+        self.mutations
+            .lock()
+            .expect("mutations")
+            .push(PersonMutation::Assign {
+                to: trimmed.to_string(),
+                handoff,
+            });
         Ok(())
     }
 

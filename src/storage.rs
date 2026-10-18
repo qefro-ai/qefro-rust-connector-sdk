@@ -31,9 +31,9 @@ impl StorageContext {
                 "ctx.storage requires platform.storage.base_url or QEFRO_STORAGE_URL"
             ));
         }
-        let context = storage
-            .and_then(|s| s.context.clone())
-            .ok_or_else(|| anyhow!("ctx.storage requires platform.storage.context on tool.invoke"))?;
+        let context = storage.and_then(|s| s.context.clone()).ok_or_else(|| {
+            anyhow!("ctx.storage requires platform.storage.context on tool.invoke")
+        })?;
         let token = storage
             .and_then(|s| s.token.clone())
             .or_else(|| std::env::var("QEFRO_SERVICE_TOKEN").ok())
